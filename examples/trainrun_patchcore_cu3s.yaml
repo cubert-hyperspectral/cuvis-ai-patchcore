@@ -1,0 +1,43 @@
+# Phase-1-only trainrun for examples/patchcore_cu3s.yaml (TrainRunConfig, loadable by `restore-trainrun`).
+# PatchCoreDetector has no gradient-trainable state: StatisticalTrainer fits the band statistics
+# and the coreset from the TRAIN split, which must contain only NORMAL frames.
+#
+#   restore-trainrun --trainrun-path examples/trainrun_patchcore_cu3s.yaml \
+#       --plugins-dir <catalog holding cuvis_ai_dataloader.yaml + the patchcore manifest> --mode train
+#
+# Replace the data/<...>.cu3s placeholders with your recordings (paths relative to the working dir).
+
+name: patchcore_cu3s_fit
+
+# Pipeline reference, resolved relative to this trainrun's directory.
+pipeline: patchcore_cu3s.yaml
+
+data:
+  data_module: cu3s
+  splits:
+    train:
+      - {kind: file_indices, source: data/<normal_session>.cu3s, ids: [0, 1, 2, 3, 4, 5]}
+    val:
+      - {kind: file_indices, source: data/<normal_session>.cu3s, ids: [6]}
+    test:
+      - {kind: file_indices, source: data/<test_session>.cu3s, ids: [0]}
+  batch_size: 1
+  params:
+    cu3s_file_path: data/<normal_session>.cu3s
+    processing_mode: Reflectance
+
+# Phase 1 only: no gradient phase, nothing to unfreeze, no loss / metric nodes.
+training:
+  seed: 42
+  max_epochs: 1
+  accelerator: auto
+
+loss_nodes: []
+metric_nodes: []
+freeze_nodes: []
+unfreeze_nodes: []
+
+output_dir: outputs/patchcore_cu3s_fit
+tags:
+  phase: "1"
+  detector: patchcore

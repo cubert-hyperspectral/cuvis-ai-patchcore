@@ -1,0 +1,35 @@
+# cuvis-ai plugin manifest (one yaml = one plugin). Local-path form for development;
+# path is resolved relative to THIS file. For frozen consumers use the git-tag form:
+#
+#   name: patchcore
+#   repo: "https://github.com/cubert-hyperspectral/cuvis-ai-patchcore.git"
+#   tag: "v0.1.0"
+#   package_name: cuvis-ai-patchcore
+#   capabilities: [ ...same list... ]
+
+name: patchcore
+path: "."
+package_name: cuvis-ai-patchcore
+capabilities:
+- class_name: cuvis_ai_patchcore.node.patchcore.PatchCoreDetector
+  category: model
+  tags: [anomaly, hyperspectral, stateful, torch]
+  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#4E7BD4\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <circle cx=\"14\" cy=\"20\" r=\"3\"/>\n  <circle cx=\"14\" cy=\"32\" r=\"3\"/>\n  <circle cx=\"14\" cy=\"44\" r=\"3\"/>\n  <circle cx=\"32\" cy=\"16\" r=\"3\"/>\n  <circle cx=\"32\" cy=\"32\" r=\"3\"/>\n  <circle cx=\"32\" cy=\"48\" r=\"3\"/>\n  <circle cx=\"50\" cy=\"26\" r=\"3\"/>\n  <circle cx=\"50\" cy=\"38\" r=\"3\"/>\n  <path d=\"M17 20l12-4M17 32l12-16M17 44l12-28\"/>\n  <path d=\"M17 20l12 12M17 32l12 0M17 44l12-12\"/>\n  <path d=\"M17 20l12 28M17 32l12 16M17 44l12 4\"/>\n  <path d=\"M35 16l12 10M35 32l12-6M35 48l12-22\"/>\n  <path d=\"M35 16l12 22M35 32l12 6M35 48l12-10\"/>\n</svg>\n"
+  input_specs:
+    cube:
+      dtype: float32
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: Hyperspectral cube [B, H, W, C] float32; C must equal input_channels.
+  output_specs:
+    scores:
+      dtype: float32
+      shape: [-1, -1, -1, 1]
+      optional: false
+      description: 'Pixel-wise anomaly scores [B, H, W, 1]: distance to the nearest coreset spectrum, bilinearly upsampled from the stride grid.'
+    anomaly_score:
+      dtype: float32
+      shape: [-1]
+      optional: false
+      description: Image-level anomaly score [B] (mean of the top topk_frac pixel scores).
+  doc_summary: Nearest-coreset spectral distance anomaly detector (HSI-PatchCore).

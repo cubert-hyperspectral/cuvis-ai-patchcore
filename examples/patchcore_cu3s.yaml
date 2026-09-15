@@ -1,0 +1,35 @@
+metadata:
+  name: patchcore_cu3s
+  description: >-
+    HSI-PatchCore anomaly scoring on a 61-band cu3s stream: CU3SDataNode -> PatchCoreDetector.
+    Phase-1 fit the coreset on normal frames with examples/trainrun_patchcore_cu3s.yaml, then run
+    with restore-pipeline --weights-path <fit>.pt.
+  tags: [anomaly, hyperspectral, patchcore, memory-bank]
+  author: cuvis.ai@cubert-gmbh.de
+
+plugins:
+  - cuvis_ai_builtin   # CU3SDataNode
+  - patchcore          # PatchCoreDetector
+
+nodes:
+  - name: source
+    class_name: cuvis_ai.node.data.CU3SDataNode
+
+  - name: patchcore
+    class_name: cuvis_ai_patchcore.node.patchcore.PatchCoreDetector
+    hparams:
+      input_channels: 61
+      coreset_size: 8000
+      stride: 4
+      bank_stride: 10
+      pool_size: 3
+      max_bank_size: 80000
+      topk_frac: 0.001
+      chunk_size: 4096
+      autocast_dtype: null   # float16 for reduced-precision NN search on CUDA
+      seed: 0
+      eps: 1.0e-06
+
+connections:
+  - source: source.outputs.cube
+    target: patchcore.inputs.cube
