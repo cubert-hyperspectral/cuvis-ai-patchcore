@@ -73,6 +73,10 @@ upsampled to the cube resolution. Two banks (raw spectra, deep features) average
 to sum to one). Feed it maps on a common scale — a fitted normalizer per detector — otherwise the
 detector with the widest range dominates. Stateless and differentiable.
 
+A complete two-bank pipeline (raw-spectra bank + SteerViT-feature bank + fusion) and its Phase-1
+trainrun ship with [cuvis-ai-steervit](https://github.com/cubert-hyperspectral/cuvis-ai-steervit)
+under `examples/`, since that side needs both plugins.
+
 ### Latency knobs
 
 The scoring cost is `(H/stride)·(W/stride)·coreset_size·C` multiply-adds. Raising `stride` and
