@@ -20,16 +20,39 @@ capabilities:
       dtype: float32
       shape: [-1, -1, -1, -1]
       optional: false
-      description: Hyperspectral cube [B, H, W, C] float32; C must equal input_channels.
+      description: 'Dense feature grid [B, H, W, C] float32: a hyperspectral cube (spectra as features) or any per-location features such as ViT patch tokens on their patch grid; C must equal input_channels.'
+    reference:
+      dtype: float32
+      shape: [-1, -1, -1, -1]
+      optional: true
+      description: Optional [B, H_ref, W_ref, *] tensor whose spatial size sets the resolution of `scores` (e.g. the cube when the input is a coarse feature grid). Defaults to the input's own H, W.
   output_specs:
     scores:
       dtype: float32
       shape: [-1, -1, -1, 1]
       optional: false
-      description: 'Pixel-wise anomaly scores [B, H, W, 1]: distance to the nearest coreset spectrum, bilinearly upsampled from the stride grid.'
+      description: 'Pixel-wise anomaly scores [B, H, W, 1]: distance to the nearest coreset entry, bilinearly upsampled from the stride grid to the input (or reference) size.'
     anomaly_score:
       dtype: float32
       shape: [-1]
       optional: false
       description: Image-level anomaly score [B] (mean of the top topk_frac pixel scores).
-  doc_summary: Nearest-coreset spectral distance anomaly detector (HSI-PatchCore).
+  doc_summary: Nearest-coreset distance anomaly detector on spectra or dense feature grids (PatchCore).
+- class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
+  category: transform
+  tags: [anomaly, torch]
+  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
+  input_specs:
+    scores:
+      dtype: float32
+      shape: [-1, -1, -1, 1]
+      optional: false
+      description: Score maps [B, H, W, 1] of identical shape, one per inbound connection (fan-in); connect every detector's normalized map to this port.
+      variadic: true
+  output_specs:
+    scores:
+      dtype: float32
+      shape: [-1, -1, -1, 1]
+      optional: false
+      description: Fused score map [B, H, W, 1] per ``mode``.
+  doc_summary: Fuse N score maps [B, H, W, 1] into one by ``mode`` (mean | min | max | wmean).

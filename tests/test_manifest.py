@@ -11,6 +11,7 @@ import yaml
 from cuvis_ai_core.node.node import Node
 from cuvis_ai_core.utils.node_registry import NodeRegistry
 
+from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
 pytestmark = pytest.mark.integration
@@ -19,11 +20,12 @@ REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / "plugins.yaml"
 
 
-def test_manifest_registers_plugin_and_resolves_node():
+def test_manifest_registers_plugin_and_resolves_nodes():
     registry = NodeRegistry()
     registry.register_plugin(str(MANIFEST))
     assert registry.list_plugins() == ["patchcore"]
     assert registry.get("PatchCoreDetector") is PatchCoreDetector
+    assert registry.get("ScoreMapFusion") is ScoreMapFusion
 
 
 def test_manifest_capabilities_are_importable_nodes():

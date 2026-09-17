@@ -1,26 +1,34 @@
-"""HSI-PatchCore — nonparametric memory-bank anomaly detection on raw hyperspectral spectra.
+"""HSI-PatchCore — nonparametric memory-bank anomaly detection on dense per-location features.
 
 PatchCore (Roth et al., CVPR 2022) scores a location by the distance between its feature vector
-and the nearest entry of a coreset-subsampled memory bank of *normal* features. Its deep-CNN patch
-features are replaced here by the hyperspectral spectrum itself, which is already a dense,
-physically meaningful per-pixel feature:
+and the nearest entry of a coreset-subsampled memory bank of *normal* features. The node takes any
+``[B, H, W, C]`` grid of features:
 
-1. z-score every band with statistics fitted on normal data (``mu`` / ``sd`` buffers);
+- a hyperspectral cube, whose spectrum is already a dense, physically meaningful per-pixel feature
+  (``standardize=True``: every band is z-scored with statistics fitted on normal data);
+- a deep feature grid, e.g. ViT patch tokens laid out on their patch grid
+  (``standardize=False``: the features are used as they are).
+
+Pipeline per frame:
+
+1. optionally z-score every channel with the fitted ``mu`` / ``sd`` buffers;
 2. average over a ``pool_size`` x ``pool_size`` window (PatchCore's "locally aware" aggregation);
 3. sample the pooled map on a ``stride`` grid (``bank_stride`` while filling the bank);
 4. score = Euclidean distance to the nearest ``coreset`` row (k = 1);
-5. bilinearly upsample the coarse distance map to the cube resolution.
+5. bilinearly upsample the coarse distance map to the input resolution, or to the resolution of
+   the optional ``reference`` input (the cube, when the input is a coarse feature grid).
 
-Because z-scoring is affine per band and average pooling is linear, the bank is built in ONE pass
-over the fit stream: window sums of the raw cube (plus the number of in-image cells per window, so
-the zero-padded border is standardised exactly like an inference-time pooled z-score) are collected
-while the band statistics accumulate, then standardised once, capped to ``max_bank_size`` rows,
-and reduced to ``coreset_size`` rows with k-center greedy
+Because z-scoring is affine per channel and average pooling is linear, the bank is built in ONE
+pass over the fit stream: window sums of the raw input (plus the number of in-image cells per
+window, so the zero-padded border is standardised exactly like an inference-time pooled z-score)
+are collected while the channel statistics accumulate, then standardised once, capped to
+``max_bank_size`` rows, and reduced to ``coreset_size`` rows with k-center greedy
 (:func:`cuvis_ai_patchcore.sampling.k_center_greedy`).
 
 The node is nonparametric (no gradient-trainable state, no ``TRAINABLE_BUFFERS``); Phase 1
 (``StatisticalTrainer`` / ``restore-trainrun``) is its whole training. All fitted state lives in
-eagerly-sized buffers, so ``state_dict`` round-trips through the pipeline ``.pt``.
+eagerly-sized buffers, so ``state_dict`` round-trips through the pipeline ``.pt``; with
+``standardize=False`` the ``mu`` / ``sd`` buffers stay at their identity values.
 """
 
 from __future__ import annotations
@@ -48,13 +56,15 @@ _AUTOCAST_DTYPES: dict[str, torch.dtype] = {
 # that expansion past float16's 65504 -> inf distance -> a NaN/inf frame. Clamping |z| to
 # ``_HALF_CLIP`` and scaling by ``_HALF_SCALE`` keeps every intermediate in range (max squared
 # distance 4 * C * (clip * scale)^2 ~ 3.9e3 for C=61); the distance is rescaled afterwards, so
-# only pixels beyond 64 sigma (already extreme anomalies) differ from the float32 path.
+# only pixels beyond 64 sigma (already extreme anomalies) differ from the float32 path. The clamp
+# is a z-unit assumption and is applied only when the node standardizes; raw feature grids get the
+# pre-scaling alone.
 _HALF_CLIP = 64.0
 _HALF_SCALE = 1.0 / 16.0
 
 
 class PatchCoreDetector(Node):
-    """Nearest-coreset spectral distance anomaly detector (HSI-PatchCore)."""
+    """Nearest-coreset distance anomaly detector on spectra or dense feature grids (PatchCore)."""
 
     _category = NodeCategory.MODEL
     _tags = frozenset({NodeTag.HYPERSPECTRAL, NodeTag.ANOMALY, NodeTag.TORCH, NodeTag.STATEFUL})
@@ -63,7 +73,17 @@ class PatchCoreDetector(Node):
         "cube": PortSpec(
             dtype=torch.float32,
             shape=(-1, -1, -1, -1),
-            description="Hyperspectral cube [B, H, W, C] float32; C must equal input_channels.",
+            description="Dense feature grid [B, H, W, C] float32: a hyperspectral cube (spectra "
+            "as features) or any per-location features such as ViT patch tokens on their patch "
+            "grid; C must equal input_channels.",
+        ),
+        "reference": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, -1),
+            optional=True,
+            description="Optional [B, H_ref, W_ref, *] tensor whose spatial size sets the "
+            "resolution of `scores` (e.g. the cube when the input is a coarse feature grid). "
+            "Defaults to the input's own H, W.",
         ),
     }
 
@@ -72,7 +92,7 @@ class PatchCoreDetector(Node):
             dtype=torch.float32,
             shape=(-1, -1, -1, 1),
             description="Pixel-wise anomaly scores [B, H, W, 1]: distance to the nearest coreset "
-            "spectrum, bilinearly upsampled from the stride grid.",
+            "entry, bilinearly upsampled from the stride grid to the input (or reference) size.",
         ),
         "anomaly_score": PortSpec(
             dtype=torch.float32,
@@ -92,6 +112,7 @@ class PatchCoreDetector(Node):
         topk_frac: float = 0.001,
         chunk_size: int = 4096,
         autocast_dtype: str | None = None,
+        standardize: bool = True,
         seed: int = 0,
         eps: float = 1e-6,
         **kwargs: Any,
@@ -100,7 +121,8 @@ class PatchCoreDetector(Node):
 
         Parameters
         ----------
-        input_channels : number of spectral bands ``C`` of the input cube.
+        input_channels : number of channels ``C`` of the input grid (spectral bands, or the
+            feature dimension of a deep feature grid).
         coreset_size : rows kept in the memory bank after k-center greedy. Fixed buffer size —
             a smaller bank is cycled to fill it (duplicates never change a nearest distance).
         stride : sampling stride of the scoring grid (latency scales ~1/stride**2).
@@ -108,12 +130,15 @@ class PatchCoreDetector(Node):
         pool_size : odd side of the local averaging window; ``1`` disables pooling.
         max_bank_size : random (seeded) cap on the collected normal features before coreset
             selection; bounds Phase-1 memory and time.
-        topk_frac : fraction of pixels averaged into the image-level ``anomaly_score``.
+        topk_frac : fraction of output pixels averaged into the image-level ``anomaly_score``.
         chunk_size : query rows per ``torch.cdist`` call (memory / speed trade-off).
         autocast_dtype : ``None`` (float32), ``"float16"`` or ``"bfloat16"`` — reduced-precision
             nearest-neighbour search, applied on CUDA inputs only (CPU always runs float32).
+        standardize : z-score every channel with statistics fitted in Phase 1 (``True``, the
+            spectral setting) or use the input features unchanged (``False``, for deep feature
+            grids that are already on a common scale).
         seed : RNG seed for the bank cap and the k-center-greedy start point.
-        eps : floor for the per-band standard deviation.
+        eps : floor for the per-channel standard deviation.
         """
         if input_channels <= 0:
             raise ValueError(f"input_channels must be positive, got {input_channels}")
@@ -144,6 +169,7 @@ class PatchCoreDetector(Node):
         self.topk_frac = float(topk_frac)
         self.chunk_size = int(chunk_size)
         self.autocast_dtype = autocast_dtype
+        self.standardize = bool(standardize)
         self.seed = int(seed)
         self.eps = float(eps)
 
@@ -157,6 +183,7 @@ class PatchCoreDetector(Node):
             topk_frac=self.topk_frac,
             chunk_size=self.chunk_size,
             autocast_dtype=self.autocast_dtype,
+            standardize=self.standardize,
             seed=self.seed,
             eps=self.eps,
             **kwargs,
@@ -176,9 +203,9 @@ class PatchCoreDetector(Node):
         return x_bchw[:, :, ::stride, ::stride]
 
     def _features(self, cube: Tensor, stride: int) -> Tensor:
-        """BHWC cube -> z-scored pooled features [B, C, gh, gw] (the inference feature)."""
-        z = ((cube - self.mu) / self.sd).permute(0, 3, 1, 2)
-        return self._pooled(z, stride)
+        """BHWC grid -> (optionally z-scored) pooled features [B, C, gh, gw]."""
+        z = (cube - self.mu) / self.sd if self.standardize else cube
+        return self._pooled(z.permute(0, 3, 1, 2), stride)
 
     def _window_sums(self, cube: Tensor, stride: int) -> tuple[Tensor, Tensor]:
         """Raw window sums [B, C, gh, gw] and in-image cell counts [B, 1, gh, gw] on the grid.
@@ -198,8 +225,11 @@ class PatchCoreDetector(Node):
         bank = self.coreset
         rescale = 1.0
         if self._nn_dtype is not None and flat.is_cuda:
-            flat = (flat.clamp(-_HALF_CLIP, _HALF_CLIP) * _HALF_SCALE).to(self._nn_dtype)
-            bank = (bank.clamp(-_HALF_CLIP, _HALF_CLIP) * _HALF_SCALE).to(self._nn_dtype)
+            if self.standardize:  # the clamp is a z-unit assumption
+                flat = flat.clamp(-_HALF_CLIP, _HALF_CLIP)
+                bank = bank.clamp(-_HALF_CLIP, _HALF_CLIP)
+            flat = (flat * _HALF_SCALE).to(self._nn_dtype)
+            bank = (bank * _HALF_SCALE).to(self._nn_dtype)
             rescale = 1.0 / _HALF_SCALE
         out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
         for i in range(0, flat.shape[0], self.chunk_size):
@@ -210,15 +240,17 @@ class PatchCoreDetector(Node):
     # ------------------------------------------------------------------ phase 1
     @torch.no_grad()
     def statistical_initialization(self, input_stream) -> None:
-        """Fit band statistics and the coreset memory bank from a stream of normal cubes.
+        """Fit channel statistics (if standardizing) and the coreset from a stream of normal grids.
 
-        Single pass: ``StreamingMeanVar`` accumulates per-band mean / variance over all pixels
-        while raw window sums (and in-image cell counts) on the ``bank_stride`` grid are
-        collected; the samples are standardised afterwards into exactly the inference feature,
-        capped to ``max_bank_size`` rows and reduced to ``coreset_size`` rows by k-center greedy.
+        Single pass: ``StreamingMeanVar`` accumulates per-channel mean / variance over all pixels
+        (skipped when ``standardize=False``) while raw window sums (and in-image cell counts) on
+        the ``bank_stride`` grid are collected; the samples are standardised afterwards into
+        exactly the inference feature, capped to ``max_bank_size`` rows and reduced to
+        ``coreset_size`` rows by k-center greedy.
         """
         self._statistically_initialized = False
-        stats = StreamingMeanVar(self.input_channels)
+        stats = StreamingMeanVar(self.input_channels) if self.standardize else None
+        n_pixels = 0
         sums: list[Tensor] = []
         counts: list[Tensor] = []
         for batch in input_stream:
@@ -227,26 +259,32 @@ class PatchCoreDetector(Node):
                 continue
             if cube.shape[-1] != self.input_channels:
                 raise ValueError(
-                    f"{type(self).__name__}: cube has {cube.shape[-1]} channels, "
+                    f"{type(self).__name__}: input has {cube.shape[-1]} channels, "
                     f"input_channels={self.input_channels}"
                 )
             cube = cube.float()
-            # Row chunks keep the float64 temporaries of the accumulator small (a 1000x1080x61
-            # cube would otherwise need ~1 GB of transient GPU memory next to the SDK's pools).
-            for rows in cube.reshape(-1, self.input_channels).split(262144, dim=0):
-                stats.update(rows)
+            n_pixels += cube.shape[0] * cube.shape[1] * cube.shape[2]
+            if stats is not None:
+                # Row chunks keep the float64 temporaries of the accumulator small (a 1000x1080x61
+                # cube would otherwise need ~1 GB of transient GPU memory next to the SDK's pools).
+                for rows in cube.reshape(-1, self.input_channels).split(262144, dim=0):
+                    stats.update(rows)
             s, n = self._window_sums(cube, self.bank_stride)  # [B,C,gh,gw], [B,1,gh,gw]
             sums.append(s.permute(0, 2, 3, 1).reshape(-1, self.input_channels))
             counts.append(n.permute(0, 2, 3, 1).reshape(-1, 1))
-        if stats.count < 2 or not sums:
+        if n_pixels < 2 or not sums:
             raise RuntimeError(
                 f"{type(self).__name__}.statistical_initialization() received insufficient "
                 "normal data (need at least 2 pixels)."
             )
 
         device = sums[0].device
-        mu = stats.mean.to(device)
-        sd = stats.var.sqrt().clamp_min(self.eps).to(device)
+        if stats is not None:
+            mu = stats.mean.to(device)
+            sd = stats.var.sqrt().clamp_min(self.eps).to(device)
+        else:  # identity standardisation: the bank holds the pooled raw features
+            mu = torch.zeros(self.input_channels, dtype=torch.float32, device=device)
+            sd = torch.ones(self.input_channels, dtype=torch.float32, device=device)
         k2 = float(self.pool_size * self.pool_size)
         bank = (torch.cat(sums, dim=0) - torch.cat(counts, dim=0) * mu) / (k2 * sd)
 
@@ -265,14 +303,16 @@ class PatchCoreDetector(Node):
         self._statistically_initialized = True
 
     # ------------------------------------------------------------------ inference
-    def forward(self, cube: Tensor, **_: Any) -> dict[str, Tensor]:
-        """Score a BHWC cube against the fitted coreset."""
+    def forward(self, cube: Tensor, reference: Tensor | None = None, **_: Any) -> dict[str, Tensor]:
+        """Score a BHWC grid against the fitted coreset; ``reference`` sets the output size."""
         if not self._statistically_initialized:
             raise RuntimeError(
                 f"{type(self).__name__} requires statistical_initialization() (Phase 1) or "
                 "loaded weights before forward()."
             )
         b, h, w, c = cube.shape
+        if reference is not None:
+            h, w = int(reference.shape[1]), int(reference.shape[2])
         q = self._features(cube, self.stride)  # [B, C, gh, gw]
         gh, gw = q.shape[-2:]
         flat = q.permute(0, 2, 3, 1).reshape(-1, c)

@@ -15,3 +15,13 @@
 - Added the local-path plugin manifest (`plugins.yaml`), an example cu3s pipeline + Phase-1 trainrun
   (`examples/`), and tests: golden parity against the reference scoring formula, port contract,
   fit statistics, coreset membership, state-dict round-trip, manifest loading, pipeline reload smoke.
+- Added feature-grid mode to `PatchCoreDetector`: `standardize=False` scores any dense
+  `[B, H, W, C]` feature grid (e.g. ViT patch tokens on their patch grid) with its raw values; the
+  `mu` / `sd` buffers stay at identity, so the state-dict layout is unchanged.
+- Added the optional `reference` input to `PatchCoreDetector`: its spatial size sets the resolution
+  of `scores`, so a coarse feature-grid map is upsampled to the cube resolution.
+- Added `ScoreMapFusion`: variadic fan-in fusion of N score maps by mean / min / max / weighted mean.
+
+### Changed
+- Reduced-precision guard: the +-64 clamp applies only when standardizing (it is a z-unit
+  assumption); raw feature grids get the 1/16 pre-scaling alone.

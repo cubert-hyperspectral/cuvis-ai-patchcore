@@ -18,8 +18,9 @@ from every entry.
 
 | Port | Direction | Shape / dtype | Notes |
 |---|---|---|---|
-| `cube` | in | `[B, H, W, C]` float32 | `C == input_channels` |
-| `scores` | out | `[B, H, W, 1]` float32 | nearest-coreset Euclidean distance, bilinearly upsampled from the stride grid |
+| `cube` | in | `[B, H, W, C]` float32 | a hyperspectral cube or any dense feature grid (e.g. ViT patch tokens); `C == input_channels` |
+| `reference` | in, optional | `[B, H_ref, W_ref, *]` float32 | its spatial size sets the `scores` resolution (pass the cube when the input is a coarse feature grid) |
+| `scores` | out | `[B, H, W, 1]` float32 | nearest-coreset Euclidean distance, bilinearly upsampled from the stride grid to the input (or reference) size |
 | `anomaly_score` | out | `[B]` float32 | mean of the top `topk_frac` pixel scores (image-level alarm) |
 
 | hparam | default | meaning |
@@ -33,6 +34,7 @@ from every entry.
 | `topk_frac` | 0.001 | pixel fraction averaged into `anomaly_score` |
 | `chunk_size` | 4096 | query rows per `torch.cdist` call |
 | `autocast_dtype` | `null` | `float16` / `bfloat16` nearest-neighbour search on CUDA (CPU stays float32) |
+| `standardize` | `true` | z-score every channel with fitted statistics (spectra); `false` uses the input features unchanged (deep feature grids) |
 | `seed` | 0 | RNG seed for the bank cap and the greedy start point |
 | `eps` | 1e-6 | floor for the per-band standard deviation |
 
@@ -49,6 +51,27 @@ affine map), capped to `max_bank_size` rows and reduced to `coreset_size` rows b
 its sparse random projection (unnecessary for low-dimensional spectra) and seeded for
 reproducibility. Run it with `StatisticalTrainer` or `restore-trainrun`; see
 [`examples/trainrun_patchcore_cu3s.yaml`](examples/trainrun_patchcore_cu3s.yaml).
+
+### Memory bank on deep features
+
+The same node scores a dense feature grid — e.g. the `[B, 24, 24, 768]` patch tokens of a ViT —
+when the features are used as they are: `input_channels: 768`, `standardize: false`, `pool_size: 1`,
+`stride: 1`, `bank_stride: 1`, and the cube connected to `reference` so the 24×24 distance map is
+upsampled to the cube resolution. Two banks (raw spectra, deep features) averaged with
+`ScoreMapFusion` see complementary anomalies: spectral outliers and shape / texture novelty.
+
+## ScoreMapFusion
+
+`cuvis_ai_patchcore.node.fusion.ScoreMapFusion` — fuse N score maps into one.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `scores` | in, variadic | `[B, H, W, 1]` float32 | one inbound connection per map; all maps share one shape |
+| `scores` | out | `[B, H, W, 1]` float32 | fused map |
+
+`mode`: `mean` (default) · `min` (AND) · `max` (OR) · `wmean` with `weights` (one per map, normalised
+to sum to one). Feed it maps on a common scale — a fitted normalizer per detector — otherwise the
+detector with the widest range dominates. Stateless and differentiable.
 
 ### Latency knobs
 
