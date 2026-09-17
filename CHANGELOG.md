@@ -26,6 +26,11 @@
   at 0 and never clamped above, so an anomaly scoring beyond the normal range keeps its rank. The
   calibration the two-bank fusion needs (min-max is set by one extreme pixel, a clamped percentile
   range saturates on drifted sessions).
+- Added anomalib's coreset recipe as an option: `cuvis_ai_patchcore.sampling.sparse_random_projection`
+  (very sparse random projection to the Johnson-Lindenstrauss dimension, `density = 1/sqrt(F)`) and
+  `k_center_greedy(..., projection_eps=...)`, exposed on `PatchCoreDetector` as
+  `coreset_projection="sparse_random"` / `projection_eps` (default off: exact distances). Seeded, so
+  unlike anomalib's global-RNG selection a fit is reproducible.
 
 ### Changed
 - Reduced-precision guard: the +-64 clamp applies only when standardizing (it is a z-unit

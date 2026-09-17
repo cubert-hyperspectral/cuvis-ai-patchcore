@@ -45,6 +45,7 @@ from torch import Tensor
 from cuvis_ai_patchcore.sampling import k_center_greedy
 from cuvis_ai_patchcore.streaming_stats import StreamingMeanVar
 
+_CORESET_PROJECTIONS = {"sparse_random"}
 _AUTOCAST_DTYPES: dict[str, torch.dtype] = {
     "float16": torch.float16,
     "fp16": torch.float16,
@@ -115,6 +116,8 @@ class PatchCoreDetector(Node):
         standardize: bool = True,
         seed: int = 0,
         eps: float = 1e-6,
+        coreset_projection: str | None = None,
+        projection_eps: float = 0.9,
         **kwargs: Any,
     ) -> None:
         """Create an unfitted detector; buffers are sized from the constructor arguments.
@@ -137,8 +140,14 @@ class PatchCoreDetector(Node):
         standardize : z-score every channel with statistics fitted in Phase 1 (``True``, the
             spectral setting) or use the input features unchanged (``False``, for deep feature
             grids that are already on a common scale).
-        seed : RNG seed for the bank cap and the k-center-greedy start point.
+        seed : RNG seed for the bank cap, the k-center-greedy start point and the projection.
         eps : floor for the per-channel standard deviation.
+        coreset_projection : ``None`` (default) selects the coreset on exact feature distances;
+            ``"sparse_random"`` first maps the bank through anomalib's sparse random projection
+            (Johnson-Lindenstrauss dimension for ``projection_eps``) and selects on the projected
+            distances, i.e. anomalib's ``KCenterGreedy`` recipe. Scoring always uses the original
+            features; only which rows enter the bank changes.
+        projection_eps : JL distortion parameter of the projection (anomalib default ``0.9``).
         """
         if input_channels <= 0:
             raise ValueError(f"input_channels must be positive, got {input_channels}")
@@ -159,6 +168,13 @@ class PatchCoreDetector(Node):
                 f"autocast_dtype must be None or one of {sorted(_AUTOCAST_DTYPES)}, "
                 f"got {autocast_dtype!r}"
             )
+        if coreset_projection is not None and coreset_projection not in _CORESET_PROJECTIONS:
+            raise ValueError(
+                f"coreset_projection must be None or one of {sorted(_CORESET_PROJECTIONS)}, "
+                f"got {coreset_projection!r}"
+            )
+        if not 0.0 < projection_eps < 1.0:
+            raise ValueError(f"projection_eps must be in (0, 1), got {projection_eps}")
 
         self.input_channels = int(input_channels)
         self.coreset_size = int(coreset_size)
@@ -172,6 +188,8 @@ class PatchCoreDetector(Node):
         self.standardize = bool(standardize)
         self.seed = int(seed)
         self.eps = float(eps)
+        self.coreset_projection = coreset_projection
+        self.projection_eps = float(projection_eps)
 
         super().__init__(
             input_channels=self.input_channels,
@@ -186,6 +204,8 @@ class PatchCoreDetector(Node):
             standardize=self.standardize,
             seed=self.seed,
             eps=self.eps,
+            coreset_projection=self.coreset_projection,
+            projection_eps=self.projection_eps,
             **kwargs,
         )
 
@@ -292,7 +312,12 @@ class PatchCoreDetector(Node):
         if bank.shape[0] > self.max_bank_size:
             keep = torch.randperm(bank.shape[0], generator=gen)[: self.max_bank_size]
             bank = bank[keep.to(bank.device)]
-        idx = k_center_greedy(bank, self.coreset_size, generator=gen).to(bank.device)
+        idx = k_center_greedy(
+            bank,
+            self.coreset_size,
+            generator=gen,
+            projection_eps=self.projection_eps if self.coreset_projection else None,
+        ).to(bank.device)
         core = bank[idx]
         if core.shape[0] < self.coreset_size:  # tiny bank: cycle rows to fill the fixed buffer
             core = core[torch.arange(self.coreset_size, device=core.device) % core.shape[0]]

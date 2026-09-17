@@ -35,7 +35,9 @@ from every entry.
 | `chunk_size` | 4096 | query rows per `torch.cdist` call |
 | `autocast_dtype` | `null` | `float16` / `bfloat16` nearest-neighbour search on CUDA (CPU stays float32) |
 | `standardize` | `true` | z-score every channel with fitted statistics (spectra); `false` uses the input features unchanged (deep feature grids) |
-| `seed` | 0 | RNG seed for the bank cap and the greedy start point |
+| `seed` | 0 | RNG seed for the bank cap, the greedy start point and the projection |
+| `coreset_projection` | `null` | `null` selects the coreset on exact distances; `sparse_random` runs anomalib's sparse random projection (Johnson-Lindenstrauss dimension for `projection_eps`) before k-center greedy, i.e. anomalib's `KCenterGreedy` recipe. Only the row selection changes; scoring always uses the original features |
+| `projection_eps` | 0.9 | JL distortion parameter of the projection (anomalib default) |
 | `eps` | 1e-6 | floor for the per-band standard deviation |
 
 Fitted state (`mu`, `sd`, `coreset`) lives in buffers and is written to the pipeline `.pt` by
@@ -47,8 +49,8 @@ Fitted state (`mu`, `sd`, `coreset`) lives in buffers and is written to the pipe
 per-band mean/variance (float64 Welford merge) while collecting raw `pool_size`-averaged spectra on
 the `bank_stride` grid; the samples are standardised afterwards (pooling commutes with the per-band
 affine map), capped to `max_bank_size` rows and reduced to `coreset_size` rows by
-`cuvis_ai_patchcore.sampling.k_center_greedy` — the anomalib `KCenterGreedy` selection order without
-its sparse random projection (unnecessary for low-dimensional spectra) and seeded for
+`cuvis_ai_patchcore.sampling.k_center_greedy` — the anomalib `KCenterGreedy` selection order on exact
+distances (its sparse random projection is optional: `coreset_projection: sparse_random`) and seeded for
 reproducibility. Run it with `StatisticalTrainer` or `restore-trainrun`; see
 [`examples/trainrun_patchcore_cu3s.yaml`](examples/trainrun_patchcore_cu3s.yaml).
 
