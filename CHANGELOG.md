@@ -21,6 +21,11 @@
 - Added the optional `reference` input to `PatchCoreDetector`: its spatial size sets the resolution
   of `scores`, so a coarse feature-grid map is upsampled to the cube resolution.
 - Added `ScoreMapFusion`: variadic fan-in fusion of N score maps by mean / min / max / weighted mean.
+- Added `ScoreRangeNormalizer`: Phase-1 calibration of a score map onto its normal range, the
+  pooled `low` / `high` percentiles (1 / 99) of subsampled normal scores mapped to 0 / 1, floored
+  at 0 and never clamped above, so an anomaly scoring beyond the normal range keeps its rank. The
+  calibration the two-bank fusion needs (min-max is set by one extreme pixel, a clamped percentile
+  range saturates on drifted sessions).
 
 ### Changed
 - Reduced-precision guard: the +-64 clamp applies only when standardizing (it is a z-unit

@@ -11,6 +11,7 @@ import yaml
 from cuvis_ai_core.node.node import Node
 from cuvis_ai_core.utils.node_registry import NodeRegistry
 
+from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
@@ -26,6 +27,7 @@ def test_manifest_registers_plugin_and_resolves_nodes():
     assert registry.list_plugins() == ["patchcore"]
     assert registry.get("PatchCoreDetector") is PatchCoreDetector
     assert registry.get("ScoreMapFusion") is ScoreMapFusion
+    assert registry.get("ScoreRangeNormalizer") is ScoreRangeNormalizer
 
 
 def test_manifest_capabilities_are_importable_nodes():

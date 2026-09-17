@@ -16,6 +16,7 @@ from cuvis_ai_schemas.enums import ExecutionStage
 from cuvis_ai_schemas.execution import Context
 from cuvis_ai_schemas.pipeline import PortSpec
 
+from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
@@ -156,5 +157,78 @@ def test_two_bank_fusion_pipeline_reloads(tmp_path):
     )
     restored_pcf = next(n for n in restored.nodes if not isinstance(n, str) and n.name == "pcf")
     assert restored_pcf.hparams["standardize"] is False
+    after = restored.forward(batch={}, context=ctx)[("fuse", "scores")]
+    assert torch.allclose(after, before, atol=1e-6)
+
+
+def test_calibrated_two_bank_fusion_pipeline_reloads(tmp_path):
+    """Bank -> ScoreRangeNormalizer -> fusion: the calibrators' bounds survive the round-trip."""
+    src = _ConstantCubeSource(seed=5, name="src")
+    grid = _ConstantGridSource(seed=9, name="grid")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    pcf = PatchCoreDetector(
+        input_channels=D,
+        coreset_size=20,
+        stride=1,
+        bank_stride=1,
+        pool_size=1,
+        max_bank_size=200,
+        standardize=False,
+        name="pcf",
+    )
+    cal_pc = ScoreRangeNormalizer(fit_subsample=1, name="cal_pc")
+    cal_pcf = ScoreRangeNormalizer(fit_subsample=1, name="cal_pcf")
+    fuse = ScoreMapFusion(mode="mean", name="fuse")
+    _fit(pc)
+    g = torch.Generator().manual_seed(77)
+    pcf.statistical_initialization(
+        iter([{"cube": torch.randn(1, GH, GW, D, generator=g) * 3.0} for _ in range(3)])
+    )
+    # calibrate each bank on its own scores of "normal" inputs
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    cal_pc.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    cal_pcf.statistical_initialization(
+        iter(
+            [
+                {
+                    "scores": pcf(cube=torch.randn(1, GH, GW, D, generator=g) * 3.0, reference=ref)[
+                        "scores"
+                    ]
+                }
+            ]
+        )
+    )
+    pipe = CuvisPipeline("calibrated_two_bank_fusion_smoke")
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(grid.outputs.features, pcf.inputs.cube)
+    pipe.connect(src.outputs.cube, pcf.inputs.reference)
+    pipe.connect(pc.outputs.scores, cal_pc.inputs.scores)
+    pipe.connect(pcf.outputs.scores, cal_pcf.inputs.scores)
+    pipe.connect(cal_pc.outputs.normalized, fuse.inputs.scores)
+    pipe.connect(cal_pcf.outputs.normalized, fuse.inputs.scores)
+
+    ctx = Context(stage=ExecutionStage.INFERENCE)
+    out = pipe.forward(batch={}, context=ctx)
+    before = out[("fuse", "scores")]
+    assert torch.isfinite(before).all() and before.min() >= 0  # floored, unclamped above
+
+    yaml_path = tmp_path / "calibrated.yaml"
+    pipe.save_to_file(str(yaml_path))
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    cal = next(n for n in restored.nodes if not isinstance(n, str) and n.name == "cal_pc")
+    assert isinstance(cal, ScoreRangeNormalizer) and cal._statistically_initialized is True
+    assert torch.equal(cal.lo, cal_pc.lo) and torch.equal(cal.hi, cal_pc.hi)
     after = restored.forward(batch={}, context=ctx)[("fuse", "scores")]
     assert torch.allclose(after, before, atol=1e-6)

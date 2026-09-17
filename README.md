@@ -73,9 +73,28 @@ upsampled to the cube resolution. Two banks (raw spectra, deep features) average
 to sum to one). Feed it maps on a common scale — a fitted normalizer per detector — otherwise the
 detector with the widest range dominates. Stateless and differentiable.
 
-A complete two-bank pipeline (raw-spectra bank + SteerViT-feature bank + fusion) and its Phase-1
-trainrun ship with [cuvis-ai-steervit](https://github.com/cubert-hyperspectral/cuvis-ai-steervit)
-under `examples/`, since that side needs both plugins.
+## ScoreRangeNormalizer
+
+`cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer` — put one detector's map on its normal
+scale before fusing. Phase 1 pools the (subsampled, capped) scores of the normal frames and stores
+their `low` / `high` percentiles (default 1 / 99) in the `lo` / `hi` buffers; inference maps them to
+0 / 1 with `(x - lo) / (hi - lo)`, floored at 0 (`floor: true`) and **never clamped above**, so an
+anomaly scoring far beyond the normal range keeps its rank. Two alternatives were measured to break
+the two-bank fusion: a min-max range (set by the single most extreme normal pixel) and a clamped
+percentile range (saturates every anomaly on a drifted session).
+
+| Port | Direction | Shape / dtype |
+|---|---|---|
+| `scores` | in | `[B, H, W, C]` float32, `C == n_channels` (1 for an anomaly map) |
+| `normalized` | out | `[B, H, W, C]` float32, `>= 0`, unbounded above |
+
+hparams: `n_channels` 1 · `low` 1.0 · `high` 99.0 · `floor` true · `fit_subsample` 4 (spatial stride
+of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 0 · `eps` 1e-9.
+
+A complete two-bank pipeline (raw-spectra bank + SteerViT-feature bank, each calibrated by
+`ScoreRangeNormalizer`, fused by `ScoreMapFusion`) and its Phase-1 trainrun ship with
+[cuvis-ai-steervit](https://github.com/cubert-hyperspectral/cuvis-ai-steervit) under `examples/`,
+since that side needs both plugins.
 
 ### Latency knobs
 
