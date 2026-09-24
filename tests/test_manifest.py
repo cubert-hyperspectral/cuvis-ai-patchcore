@@ -13,6 +13,7 @@ from cuvis_ai_core.utils.node_registry import NodeRegistry
 
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
+from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
 pytestmark = pytest.mark.integration
@@ -28,6 +29,7 @@ def test_manifest_registers_plugin_and_resolves_nodes():
     assert registry.get("PatchCoreDetector") is PatchCoreDetector
     assert registry.get("ScoreMapFusion") is ScoreMapFusion
     assert registry.get("ScoreRangeNormalizer") is ScoreRangeNormalizer
+    assert registry.get("FrameScoreGate") is FrameScoreGate
 
 
 def test_manifest_capabilities_are_importable_nodes():

@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- Added `FrameScoreGate`: a stateless post-processor that zeros an anomaly map unless its
+  top-`topk_frac` frame score exceeds `threshold` (`mode: heatmap` passes the map through, `mask`
+  binarises it at `mask_threshold`); emits the gated `scores [B, H, W, C]`, `frame_score [B]` and
+  `passed [B]`. The optional `alarm_scores` input alarms on one map while another is displayed.
+  Live-calibration helpers: `log_scores` logs every frame decision, `smooth_k` gates on the rolling
+  median of the last k frame scores. Generic node, planned to move to cuvis-ai core.
 - Added `PatchCoreDetector` node — HSI-PatchCore: per-band z-scored spectra, `pool_size`×`pool_size`
   local averaging, stride-grid sampling, k-center-greedy coreset memory bank fitted in Phase 1
   (`statistical_initialization`), nearest-coreset Euclidean distance scoring, bilinear upsampling

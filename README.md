@@ -98,6 +98,28 @@ A complete two-bank pipeline (raw-spectra bank + SteerViT-feature bank, each cal
 [cuvis-ai-steervit](https://github.com/cubert-hyperspectral/cuvis-ai-steervit) under `examples/`,
 since that side needs both plugins.
 
+## FrameScoreGate
+
+`cuvis_ai_patchcore.node.gate.FrameScoreGate` — show an anomaly map only on anomalous frames. The
+frame score is the mean of the top `topk_frac` pixels (default 0.1 %) of the alarm map; at or
+below `threshold` the frame's output is all zeros. `alarm_scores` (optional) lets the gate score one
+map while it displays another, e.g. alarm on a robust feature bank, display a sharper fusion map.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `scores` | in | `[B, H, W, C]` float32 | the display map |
+| `alarm_scores` | in, optional | `[B, H, W, C]` float32 | map that drives the gate; default `scores` |
+| `scores` | out | `[B, H, W, C]` float32 | display map (or its `mask_threshold` binary mask) on passing frames, zeros otherwise |
+| `frame_score` | out | `[B]` float32 | raw per-frame alarm score |
+| `passed` | out | `[B]` int32 | 1 when the (smoothed) score > `threshold` |
+
+hparams: `threshold` (required; set above the session's clean band) · `topk_frac` 0.001 · `mode`
+`heatmap` | `mask` · `mask_threshold` (default `threshold`) · `log_scores` false (log every frame
+decision at INFO, for calibrating on a live session) · `smooth_k` 1 (> 1: gate on the rolling median
+of the last k frame scores; runtime state, one frame per forward). Stateless otherwise: the
+threshold is a hyper-parameter, not a fitted buffer, because the operating point drifts with the
+session.
+
 ### Latency knobs
 
 The scoring cost is `(H/stride)·(W/stride)·coreset_size·C` multiply-adds. Raising `stride` and
