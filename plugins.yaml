@@ -55,7 +55,7 @@ capabilities:
       shape: [-1, -1, -1, 1]
       optional: false
       description: Fused score map [B, H, W, 1] per ``mode``.
-  doc_summary: Fuse N score maps [B, H, W, 1] into one by ``mode`` (mean | min | max | wmean).
+  doc_summary: Fuse N score maps [B, H, W, 1] into one by ``mode`` (mean | min | max | wmean | first).
 - class_name: cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer
   category: transform
   tags: [anomaly, normalization, stateful, torch]

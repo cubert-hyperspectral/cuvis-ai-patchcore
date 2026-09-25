@@ -26,7 +26,8 @@
   `mu` / `sd` buffers stay at identity, so the state-dict layout is unchanged.
 - Added the optional `reference` input to `PatchCoreDetector`: its spatial size sets the resolution
   of `scores`, so a coarse feature-grid map is upsampled to the cube resolution.
-- Added `ScoreMapFusion`: variadic fan-in fusion of N score maps by mean / min / max / weighted mean.
+- Added `ScoreMapFusion`: variadic fan-in fusion of N score maps by mean / min / max / weighted mean,
+  or `first` (per frame, the first inbound map that is not all zero: a priority display of gated maps).
 - Added `ScoreRangeNormalizer`: Phase-1 calibration of a score map onto its normal range, the
   pooled `low` / `high` percentiles (1 / 99) of subsampled normal scores mapped to 0 / 1, floored
   at 0 and never clamped above, so an anomaly scoring beyond the normal range keeps its rank. The

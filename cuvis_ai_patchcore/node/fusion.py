@@ -2,9 +2,11 @@
 
 Averaging the calibrated maps of complementary detectors (e.g. a PatchCore bank on raw spectra and
 a PatchCore bank on ViT features) cancels each detector's private noise while keeping the signal
-both agree on; ``min`` is the hard AND, ``max`` the OR, ``wmean`` a weighted average. The node is
-stateless, torch-native and differentiable. Feed it maps on a common scale (a fitted normalizer per
-detector), otherwise the detector with the widest range dominates.
+both agree on; ``min`` is the hard AND, ``max`` the OR, ``wmean`` a weighted average. ``first`` is a
+priority rule for gated maps: per frame it takes the first inbound map that is not all zero, e.g.
+one detector's display map whenever its gate opens and a second detector's only on frames the first
+misses. The node is stateless, torch-native and differentiable. Feed it maps on a common scale (a
+fitted normalizer per detector), otherwise the detector with the widest range dominates.
 """
 
 from __future__ import annotations
@@ -17,11 +19,11 @@ from cuvis_ai_schemas.enums import NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 from torch import Tensor
 
-_MODES = ("mean", "min", "max", "wmean")
+_MODES = ("mean", "min", "max", "wmean", "first")
 
 
 class ScoreMapFusion(Node):
-    """Fuse N score maps [B, H, W, 1] into one by ``mode`` (mean | min | max | wmean)."""
+    """Fuse N score maps [B, H, W, 1] into one by ``mode`` (mean | min | max | wmean | first)."""
 
     _category = NodeCategory.TRANSFORM
     _tags = frozenset({NodeTag.ANOMALY, NodeTag.TORCH})
@@ -50,8 +52,9 @@ class ScoreMapFusion(Node):
 
         Parameters
         ----------
-        mode : ``"mean"`` (arithmetic average), ``"min"`` (AND), ``"max"`` (OR) or ``"wmean"``
-            (weighted average with ``weights``, normalised to sum to one).
+        mode : ``"mean"`` (arithmetic average), ``"min"`` (AND), ``"max"`` (OR), ``"wmean"``
+            (weighted average with ``weights``, normalised to sum to one) or ``"first"`` (per frame,
+            the first inbound map in connection order that is not all zero; zeros if all are).
         weights : one non-negative weight per inbound map, required for ``"wmean"`` and rejected
             for the other modes; the count is checked against the inbound maps at run time.
         """
@@ -90,6 +93,10 @@ class ScoreMapFusion(Node):
             out = stack.amin(dim=0)
         elif self.mode == "max":
             out = stack.amax(dim=0)
+        elif self.mode == "first":  # priority: per frame, the first map that is not all zero
+            live = stack.flatten(start_dim=2).ne(0).any(dim=2)  # [N, B]
+            pick = live.to(torch.int64).argmax(dim=0)  # [B]: first live map (0 when none is live)
+            out = stack[pick, torch.arange(stack.shape[1], device=stack.device)]
         else:  # wmean
             if len(self.weights) != len(maps):
                 raise ValueError(

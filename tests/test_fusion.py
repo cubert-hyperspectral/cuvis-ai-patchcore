@@ -47,9 +47,19 @@ def test_equal_weights_wmean_equals_mean():
     assert torch.allclose(wm, mean, atol=1e-6)
 
 
+def test_first_takes_the_first_nonzero_map_per_frame():
+    a, b = _maps(2)
+    a[0] = 0.0  # frame 0: the first map is blank (a gate that did not open)
+    out = ScoreMapFusion(mode="first")(scores=[a, b])["scores"]
+    assert torch.equal(out[0], b[0])  # falls through to the second map
+    assert torch.equal(out[1], a[1])  # the first map wins wherever it is live
+    blank = [torch.zeros(B, H, W, 1), torch.zeros(B, H, W, 1)]
+    assert torch.equal(ScoreMapFusion(mode="first")(scores=blank)["scores"], blank[0])
+
+
 def test_single_map_passes_through_unchanged():
     (a,) = _maps(1)
-    for mode in ("mean", "min", "max"):
+    for mode in ("mean", "min", "max", "first"):
         assert torch.equal(ScoreMapFusion(mode=mode)(scores=[a])["scores"], a)
     assert torch.equal(ScoreMapFusion(mode="mean")(scores=a)["scores"], a)  # bare tensor
 
@@ -114,6 +124,16 @@ def test_variadic_port_collects_every_inbound_map():
     assert torch.allclose(out, torch.full((1, H, W, 1), 0.5), atol=1e-6)
 
 
+def test_first_follows_connection_order():
+    pipe = CuvisPipeline("fusion_priority")
+    a, b, c = _MapSource(0.0, name="a"), _MapSource(0.4, name="b"), _MapSource(0.9, name="c")
+    fuse = ScoreMapFusion(mode="first", name="fuse")
+    for src in (a, b, c):  # a is blank, so b (connected before c) is shown
+        pipe.connect(src.outputs.scores, fuse.inputs.scores)
+    out = pipe.forward(batch={}, stage=ExecutionStage.INFERENCE)[("fuse", "scores")]
+    assert torch.equal(out, torch.full((1, H, W, 1), 0.4))
+
+
 # ----- 4. validation / serialization ----------------------------------------------------------
 
 
@@ -125,6 +145,7 @@ def test_variadic_port_collects_every_inbound_map():
         {"mode": "wmean", "weights": [1.0, -1.0]},
         {"mode": "wmean", "weights": [0.0, 0.0]},
         {"mode": "mean", "weights": [0.5, 0.5]},  # weights only for wmean
+        {"mode": "first", "weights": [1.0, 1.0]},
     ],
 )
 def test_invalid_hparams_raise(bad):

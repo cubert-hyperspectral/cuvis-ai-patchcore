@@ -72,7 +72,9 @@ upsampled to the cube resolution. Two banks (raw spectra, deep features) average
 | `scores` | out | `[B, H, W, 1]` float32 | fused map |
 
 `mode`: `mean` (default) · `min` (AND) · `max` (OR) · `wmean` with `weights` (one per map, normalised
-to sum to one). Feed it maps on a common scale — a fitted normalizer per detector — otherwise the
+to sum to one) · `first`: per frame, the first inbound map (in connection order) that is not all zero.
+`first` is for gated maps: connect the preferred detector's gated map first, and a second detector's
+map shows only on frames the first gate blanks. Feed it maps on a common scale — a fitted normalizer per detector — otherwise the
 detector with the widest range dominates. Stateless and differentiable.
 
 ## ScoreRangeNormalizer
