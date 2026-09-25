@@ -8,7 +8,7 @@ import pytest
 import torch
 from cuvis_ai_core.node.node import Node
 from cuvis_ai_core.pipeline.pipeline import CuvisPipeline
-from cuvis_ai_schemas.enums import ExecutionStage
+from cuvis_ai_schemas.enums import ExecutionStage, NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 
 from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
@@ -103,6 +103,8 @@ def test_wmean_weight_count_mismatch_raises():
 class _MapSource(Node):
     """Module-scope test source emitting a constant score map."""
 
+    _category = NodeCategory.SOURCE
+    _tags = frozenset({NodeTag.TORCH})
     INPUT_SPECS: dict[str, PortSpec] = {}
     OUTPUT_SPECS = {"scores": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, 1))}
 

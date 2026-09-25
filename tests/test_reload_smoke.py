@@ -12,12 +12,13 @@ import yaml
 from cuvis_ai_core.node.node import Node
 from cuvis_ai_core.pipeline.pipeline import CuvisPipeline
 from cuvis_ai_core.utils.node_registry import NodeRegistry
-from cuvis_ai_schemas.enums import ExecutionStage
+from cuvis_ai_schemas.enums import ExecutionStage, NodeCategory, NodeTag
 from cuvis_ai_schemas.execution import Context
 from cuvis_ai_schemas.pipeline import PortSpec
 
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
+from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
 pytestmark = pytest.mark.integration
@@ -29,6 +30,8 @@ C, H, W = 4, 20, 16
 class _ConstantCubeSource(Node):
     """Module-scope test source: emits a deterministic random cube (seeded per instance)."""
 
+    _category = NodeCategory.SOURCE
+    _tags = frozenset({NodeTag.TORCH})
     INPUT_SPECS: dict[str, PortSpec] = {}
     OUTPUT_SPECS = {"cube": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, -1))}
 
@@ -92,6 +95,8 @@ GH, GW = 6, 5  # coarse "patch grid" of the synthetic feature source
 class _ConstantGridSource(Node):
     """Module-scope test source: emits a deterministic random feature grid (seeded per instance)."""
 
+    _category = NodeCategory.SOURCE
+    _tags = frozenset({NodeTag.TORCH})
     INPUT_SPECS: dict[str, PortSpec] = {}
     OUTPUT_SPECS = {"features": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, -1))}
 
@@ -232,3 +237,63 @@ def test_calibrated_two_bank_fusion_pipeline_reloads(tmp_path):
     assert torch.equal(cal.lo, cal_pc.lo) and torch.equal(cal.hi, cal_pc.hi)
     after = restored.forward(batch={}, context=ctx)[("fuse", "scores")]
     assert torch.allclose(after, before, atol=1e-6)
+
+
+def test_gated_priority_display_pipeline_reloads(tmp_path):
+    """Gates -> ScoreMapFusion(mode="first"): the gate hparams, the alarm_scores wiring and the
+    variadic connection order (which `first` depends on) survive save -> load."""
+    src = _ConstantCubeSource(seed=5, name="src")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    cal = ScoreRangeNormalizer(fit_subsample=1, name="cal")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    cal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    # gate_blank never opens; gate_a (alarm on the raw bank map) and gate_b (mask) both open
+    blank = FrameScoreGate(threshold=1e9, name="gate_blank")
+    gate_a = FrameScoreGate(threshold=0.0, topk_frac=0.01, name="gate_a")
+    gate_b = FrameScoreGate(threshold=0.0, mode="mask", mask_threshold=0.5, name="gate_b")
+    fuse = ScoreMapFusion(mode="first", name="fuse")
+    pipe = CuvisPipeline("gated_priority_display_smoke")
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, cal.inputs.scores)
+    pipe.connect(cal.outputs.normalized, blank.inputs.scores)
+    pipe.connect(cal.outputs.normalized, gate_a.inputs.scores)
+    pipe.connect(pc.outputs.scores, gate_a.inputs.alarm_scores)
+    pipe.connect(cal.outputs.normalized, gate_b.inputs.scores)
+    for gate in (blank, gate_a, gate_b):
+        pipe.connect(gate.outputs.scores, fuse.inputs.scores)
+
+    ctx = Context(stage=ExecutionStage.INFERENCE)
+    before = pipe.forward(batch={}, context=ctx)
+    assert before[("gate_blank", "passed")].tolist() == [0]
+    assert before[("gate_a", "passed")].tolist() == [1] and before[
+        ("gate_b", "passed")
+    ].tolist() == [1]
+    assert torch.equal(before[("fuse", "scores")], before[("gate_a", "scores")])
+    assert not torch.equal(before[("gate_a", "scores")], before[("gate_b", "scores")])
+
+    yaml_path = tmp_path / "gated.yaml"
+    pipe.save_to_file(str(yaml_path))
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert nodes["fuse"].hparams["mode"] == "first"
+    assert nodes["gate_blank"].hparams["threshold"] == 1e9
+    assert nodes["gate_b"].hparams["mode"] == "mask"
+    assert nodes["gate_b"].hparams["mask_threshold"] == 0.5
+    assert nodes["gate_a"].hparams["topk_frac"] == 0.01
+    after = restored.forward(batch={}, context=ctx)
+    for key in (("gate_a", "frame_score"), ("gate_b", "scores"), ("fuse", "scores")):
+        assert torch.allclose(after[key], before[key], atol=1e-6), key
+    assert torch.equal(after[("fuse", "scores")], after[("gate_a", "scores")])

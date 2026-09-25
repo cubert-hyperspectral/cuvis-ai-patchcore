@@ -20,7 +20,8 @@
   unnecessary for low-dimensional spectral features).
 - Added the local-path plugin manifest (`plugins.yaml`), an example cu3s pipeline + Phase-1 trainrun
   (`examples/`), and tests: golden parity against the reference scoring formula, port contract,
-  fit statistics, coreset membership, state-dict round-trip, manifest loading, pipeline reload smoke.
+  fit statistics, coreset membership, state-dict round-trip, manifest loading, pipeline reload smokes
+  (single bank, two-bank fusion, calibrated fusion, and gates feeding `ScoreMapFusion(mode="first")`).
 - Added feature-grid mode to `PatchCoreDetector`: `standardize=False` scores any dense
   `[B, H, W, C]` feature grid (e.g. ViT patch tokens on their patch grid) with its raw values; the
   `mu` / `sd` buffers stay at identity, so the state-dict layout is unchanged.
