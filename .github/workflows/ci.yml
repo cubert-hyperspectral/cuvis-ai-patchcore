@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The ends of requires-python: Thor's cuvis.next child envs run 3.11, the laptop's 3.13.
+        # Both ends of requires-python (>=3.11,<3.14).
         python-version: ["3.11", "3.13"]
     env:
       UV_PYTHON: ${{ matrix.python-version }}
