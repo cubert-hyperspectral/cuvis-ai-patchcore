@@ -15,10 +15,13 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+from cuvis_ai_core.node.metric_utils import subsample_hw
 from cuvis_ai_core.node.node import Node
 from cuvis_ai_schemas.enums import NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 from torch import Tensor
+
+from cuvis_ai_patchcore.node._common import random_cap, require_fitted
 
 
 class ScoreRangeNormalizer(Node):
@@ -98,13 +101,6 @@ class ScoreRangeNormalizer(Node):
         self.register_buffer("lo", torch.zeros(self.n_channels, dtype=torch.float32))
         self.register_buffer("hi", torch.ones(self.n_channels, dtype=torch.float32))
 
-    def _thin(self, vals: Tensor, gen: torch.Generator) -> Tensor:
-        """Seeded random cap of the collected values to ``max_fit_values`` rows."""
-        if vals.shape[0] <= self.max_fit_values:
-            return vals
-        keep = torch.randperm(vals.shape[0], generator=gen)[: self.max_fit_values]
-        return vals[keep.to(vals.device)]
-
     # ------------------------------------------------------------------ phase 1
     @torch.no_grad()
     def statistical_initialization(self, input_stream) -> None:
@@ -123,17 +119,17 @@ class ScoreRangeNormalizer(Node):
                     f"{type(self).__name__}: scores have {x.shape[-1]} channels, "
                     f"n_channels={self.n_channels}"
                 )
-            v = x[:, ::s, ::s, :].reshape(-1, self.n_channels).float()
+            v = subsample_hw(x, s).reshape(-1, self.n_channels).float()
             chunks.append(v)
             total += v.shape[0]
             if total > 2 * self.max_fit_values:  # bound memory while streaming
-                chunks = [self._thin(torch.cat(chunks, dim=0), gen)]
+                chunks = [random_cap(torch.cat(chunks, dim=0), self.max_fit_values, gen)]
                 total = chunks[0].shape[0]
         if not chunks:
             raise RuntimeError(
                 f"{type(self).__name__}.statistical_initialization() received no score maps."
             )
-        vals = self._thin(torch.cat(chunks, dim=0), gen)
+        vals = random_cap(torch.cat(chunks, dim=0), self.max_fit_values, gen)
         if vals.shape[0] < 2:
             raise RuntimeError(
                 f"{type(self).__name__}.statistical_initialization() needs at least 2 values."
@@ -149,11 +145,7 @@ class ScoreRangeNormalizer(Node):
     # ------------------------------------------------------------------ inference
     def forward(self, scores: Tensor, **_: Any) -> dict[str, Tensor]:
         """Calibrate the maps to the fitted normal range."""
-        if not self._statistically_initialized:
-            raise RuntimeError(
-                f"{type(self).__name__} requires statistical_initialization() (Phase 1) or "
-                "loaded weights before forward()."
-            )
+        require_fitted(self)
         out = (scores - self.lo) / (self.hi - self.lo).clamp_min(self.eps)
         if self.floor:
             out = out.clamp_min(0.0)

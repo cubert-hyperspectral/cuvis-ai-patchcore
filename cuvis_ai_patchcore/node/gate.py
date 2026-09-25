@@ -28,6 +28,8 @@ from cuvis_ai_schemas.pipeline import PortSpec
 from loguru import logger
 from torch import Tensor
 
+from cuvis_ai_patchcore.node._common import check_topk_frac, topk_mean
+
 _MODES = ("heatmap", "mask")
 
 
@@ -105,8 +107,7 @@ class FrameScoreGate(Node):
         """
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
             raise ValueError(f"threshold must be a number, got {threshold!r}")
-        if not 0.0 < float(topk_frac) <= 1.0:
-            raise ValueError(f"topk_frac must be in (0, 1], got {topk_frac}")
+        topk_frac = check_topk_frac(topk_frac)
         if mode not in _MODES:
             raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
         if mask_threshold is not None and (
@@ -141,10 +142,7 @@ class FrameScoreGate(Node):
                 f"alarm_scores batch {alarm_scores.shape[0]} != scores batch {scores.shape[0]}"
             )
         src = scores if alarm_scores is None else alarm_scores
-        b = src.shape[0]
-        flat = src.reshape(b, -1).float()
-        k = max(1, int(self.topk_frac * flat.shape[1]))
-        frame = torch.topk(flat, k, dim=1).values.mean(dim=1)  # [B] raw per-frame score
+        frame = topk_mean(src, self.topk_frac)  # [B] raw per-frame score
 
         if self.smooth_k > 1:
             smoothed = []

@@ -42,6 +42,7 @@ from cuvis_ai_schemas.enums import NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 from torch import Tensor
 
+from cuvis_ai_patchcore.node._common import check_topk_frac, random_cap, require_fitted, topk_mean
 from cuvis_ai_patchcore.sampling import k_center_greedy
 from cuvis_ai_patchcore.streaming_stats import StreamingMeanVar
 
@@ -159,8 +160,7 @@ class PatchCoreDetector(Node):
             raise ValueError(f"pool_size must be an odd positive integer, got {pool_size}")
         if max_bank_size < coreset_size:
             raise ValueError("max_bank_size must be >= coreset_size")
-        if not 0.0 < topk_frac <= 1.0:
-            raise ValueError(f"topk_frac must be in (0, 1], got {topk_frac}")
+        topk_frac = check_topk_frac(topk_frac)
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
         if autocast_dtype is not None and autocast_dtype not in _AUTOCAST_DTYPES:
@@ -309,9 +309,7 @@ class PatchCoreDetector(Node):
         bank = (torch.cat(sums, dim=0) - torch.cat(counts, dim=0) * mu) / (k2 * sd)
 
         gen = torch.Generator().manual_seed(self.seed)
-        if bank.shape[0] > self.max_bank_size:
-            keep = torch.randperm(bank.shape[0], generator=gen)[: self.max_bank_size]
-            bank = bank[keep.to(bank.device)]
+        bank = random_cap(bank, self.max_bank_size, gen)
         idx = k_center_greedy(
             bank,
             self.coreset_size,
@@ -330,11 +328,7 @@ class PatchCoreDetector(Node):
     # ------------------------------------------------------------------ inference
     def forward(self, cube: Tensor, reference: Tensor | None = None, **_: Any) -> dict[str, Tensor]:
         """Score a BHWC grid against the fitted coreset; ``reference`` sets the output size."""
-        if not self._statistically_initialized:
-            raise RuntimeError(
-                f"{type(self).__name__} requires statistical_initialization() (Phase 1) or "
-                "loaded weights before forward()."
-            )
+        require_fitted(self)
         b, h, w, c = cube.shape
         if reference is not None:
             h, w = int(reference.shape[1]), int(reference.shape[2])
@@ -344,6 +338,4 @@ class PatchCoreDetector(Node):
         dist = self._nearest_distance(flat).reshape(b, 1, gh, gw)
         up = F.interpolate(dist, size=(h, w), mode="bilinear", align_corners=False)  # [B,1,H,W]
         scores = up.permute(0, 2, 3, 1).contiguous()
-        k = max(1, int(self.topk_frac * h * w))
-        anomaly_score = torch.topk(up.reshape(b, -1), k, dim=1).values.mean(dim=1)
-        return {"scores": scores, "anomaly_score": anomaly_score}
+        return {"scores": scores, "anomaly_score": topk_mean(up, self.topk_frac)}

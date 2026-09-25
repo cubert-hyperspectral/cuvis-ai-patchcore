@@ -49,3 +49,10 @@
 ### Changed
 - Reduced-precision guard: the +-64 clamp applies only when standardizing (it is a z-unit
   assumption); raw feature grids get the 1/16 pre-scaling alone.
+- `PatchCoreDetector.anomaly_score` and `FrameScoreGate.frame_score` share one top-k rule,
+  `k = max(1, floor(topk_frac * n))` over the n values of a frame, rounded once: the detector's
+  two-step product floored one pixel lower for a few map sizes (e.g. 1160 x 25), so a gate on a
+  detector map now reproduces the detector's score exactly. Sizes such as 1000 x 1080 are unchanged.
+- The nodes share one private helper module for the top-k score, the `topk_frac` check, the seeded
+  Phase-1 row cap and the unfitted-`forward` guard; `ScoreRangeNormalizer` thins its Phase-1 values
+  with cuvis-ai-core's `subsample_hw`. Outputs and fitted buffers are bit-identical.
