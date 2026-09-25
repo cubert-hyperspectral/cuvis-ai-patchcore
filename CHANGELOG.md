@@ -43,6 +43,8 @@
   that installs the plugin as a path or git dependency inherits none; a guard test checks this and
   that the committed lock (the CI lock) resolves torch from PyPI.
 - Targets cuvis-ai-core >= 0.17.4 and cuvis-ai-schemas >= 0.12.0 on Python 3.11-3.13.
+- Added CI on Python 3.11 and 3.13 for every pull request (stacked PRs included) and the weekly
+  dependency compatibility audit against cuvis-ai-core v0.17.4.
 
 ### Changed
 - Reduced-precision guard: the +-64 clamp applies only when standardizing (it is a z-unit
