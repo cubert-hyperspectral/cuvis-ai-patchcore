@@ -38,6 +38,11 @@
   `k_center_greedy(..., projection_eps=...)`, exposed on `PatchCoreDetector` as
   `coreset_projection="sparse_random"` / `projection_eps` (default off: exact distances). Seeded, so
   unlike anomalib's global-RNG selection a fit is reproducible.
+- Added the `cuda` dependency group for local GPU development: torch and torchvision come from the
+  cu128 index (cu130 on aarch64 Linux / Jetson). The pins are scoped to the group, so an environment
+  that installs the plugin as a path or git dependency inherits none; a guard test checks this and
+  that the committed lock (the CI lock) resolves torch from PyPI.
+- Targets cuvis-ai-core >= 0.17.4 and cuvis-ai-schemas >= 0.12.0 on Python 3.11-3.13.
 
 ### Changed
 - Reduced-precision guard: the +-64 clamp applies only when standardizing (it is a z-unit
