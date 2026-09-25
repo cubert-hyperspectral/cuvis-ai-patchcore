@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.1.0 - 2026-09-25
+
 ### Added
 - Added `PatchCoreDetector`, HSI-PatchCore: per-band z-scored spectra, `pool_size`×`pool_size`
   local averaging, stride-grid sampling, a k-center-greedy coreset memory bank fitted in Phase 1
