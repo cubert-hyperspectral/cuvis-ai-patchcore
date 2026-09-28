@@ -42,7 +42,12 @@ dependencies = [
   # core 0.17.4 / schemas 0.12.0: the releases the plugin is tested against and cuvis.next requires.
   "cuvis-ai-core>=0.17.4",
   "cuvis-ai-schemas>=0.12.0",
-  "torch>=2.2",
+  # torch is declared once per index fork on purpose (as cuvis-ai does): the `cuda` group's index
+  # pins below fork on the same markers, and uv assigns an explicit index only to a requirement
+  # inside one fork. An unsplit requirement next to the two gated indexes fails every resolution
+  # that reads the sources (`uv sync`, `uv run`) with "conflicting indexes for package torch".
+  "torch>=2.2 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "torch>=2.2 ; sys_platform != 'linux' or platform_machine != 'aarch64'",
   "numpy>=1.24",
 ]
 
