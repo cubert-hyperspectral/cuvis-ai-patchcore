@@ -13,3 +13,5 @@ outputs/
 *.pt
 !tests/data/*.pt
 .cuvis-ai-env.json
+
+.secrets.baseline.new

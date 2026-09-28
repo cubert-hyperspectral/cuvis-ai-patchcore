@@ -1,8 +1,8 @@
 [project]
 name = "cuvis-ai-patchcore"
 dynamic = ["version"]
-description = "HSI-PatchCore for Cuvis.AI: nonparametric memory-bank anomaly detection on raw hyperspectral spectra"
-requires-python = ">=3.11,<3.12"
+description = "HSI-PatchCore for Cuvis.AI: memory-bank anomaly detection on hyperspectral spectra or dense feature grids, with score calibration, fusion and a frame gate"
+requires-python = ">=3.11,<3.14"
 authors = [
   { name = "Cubert GmbH", email = "cuvis.ai@cubert-gmbh.de" },
 ]
@@ -29,6 +29,8 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Topic :: Scientific/Engineering :: Image Processing",
@@ -37,9 +39,9 @@ classifiers = [
 
 dependencies = [
   # Plugins target cuvis-ai-core + cuvis-ai-schemas only (never the high-level cuvis-ai package).
-  # core >= 0.15: class-level EXECUTION_STAGES, `name`-only base kwargs.
-  "cuvis-ai-core>=0.15.0",
-  "cuvis-ai-schemas>=0.10.0",
+  # core 0.17.4 / schemas 0.12.0: the releases the plugin is tested against and cuvis.next requires.
+  "cuvis-ai-core>=0.17.4",
+  "cuvis-ai-schemas>=0.12.0",
   "torch>=2.2",
   "numpy>=1.24",
 ]
@@ -76,15 +78,42 @@ version_scheme = "post-release"
 local_scheme = "node-and-date"
 fallback_version = "0.1.0"
 
-# GPU plugin: torch from the cu128 index for local `uv sync`. CI runs `uv run --no-sources --locked`
-# against a uv.lock generated with `uv lock --no-sources` (CPU torch from PyPI) — do not commit a
-# locally re-resolved lock.
+[tool.uv]
+default-groups = ["cuda"]
+
+# GPU torch / torchvision for a local `uv sync`, as cuvis-ai does it: aarch64 Linux (Jetson Thor,
+# CUDA 13) resolves from cu130, every other platform from cu128. Both entries are scoped to the
+# `cuda` dependency group, because uv also reads a path or git dependency's `[tool.uv.sources]`: an
+# unscoped pin would reach every composed child environment that installs this plugin and collide
+# with the torch index mirrored from the host there. CI runs `uv run --no-sources --locked` against
+# a uv.lock generated with `uv lock --no-sources` (torch from PyPI); do not commit a lock resolved
+# with the sources. tests/test_pyproject_torch_sources.py guards this block and the lock.
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+torch = [
+  { index = "pytorch-cu128", group = "cuda", marker = "sys_platform != 'linux' or platform_machine != 'aarch64'" },
+  { index = "pytorch-cu130", group = "cuda", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+torchvision = [
+  { index = "pytorch-cu128", group = "cuda", marker = "sys_platform != 'linux' or platform_machine != 'aarch64'" },
+  { index = "pytorch-cu130", group = "cuda", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+
+[dependency-groups]
+# Floors live in [project].dependencies; this group only carries the torch index pins. torchvision
+# is pulled in by cuvis-ai-core and must come from the same index as torch.
+cuda = [
+  "torch",
+  "torchvision",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.pytest.ini_options]

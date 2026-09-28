@@ -233,12 +233,14 @@ def test_hparams_are_json_serializable_and_complete():
         "topk_frac",
         "chunk_size",
         "autocast_dtype",
+        "standardize",
         "seed",
         "eps",
     ):
         assert key in hp, key
     json.dumps(hp)  # must not raise
     assert hp["autocast_dtype"] == "float16"
+    assert hp["standardize"] is True
 
 
 # ----- 5. validation --------------------------------------------------------------------------
@@ -303,3 +305,100 @@ def test_cuda_fp16_survives_extreme_pixels():
     far[H // 2 - 8 : H // 2 + 9, W // 2 - 8 : W // 2 + 9] = False
     assert far.any()
     assert torch.allclose(s16[far], s32[far], rtol=2e-2, atol=2e-2)
+
+
+# ----- 6. feature-grid mode: standardize=False and the reference input -------------------------
+
+D = 6  # feature dimension of the synthetic "patch-token" grids
+GRID_KW = {
+    "input_channels": D,
+    "coreset_size": 30,
+    "stride": 1,
+    "bank_stride": 1,
+    "pool_size": 1,
+    "max_bank_size": 300,
+    "standardize": False,
+}
+
+
+def _grids(n: int = 3, seed: int = 21) -> list[dict[str, torch.Tensor]]:
+    g = torch.Generator().manual_seed(seed)
+    return [{"cube": torch.randn(1, 9, 8, D, generator=g) * 3.0 + 1.5} for _ in range(n)]
+
+
+def test_feature_mode_keeps_identity_stats_and_scores_raw_distance():
+    node = PatchCoreDetector(**GRID_KW)
+    node.statistical_initialization(iter(_grids()))
+    assert torch.equal(node.mu, torch.zeros(D)) and torch.equal(node.sd, torch.ones(D))
+    q = torch.randn(1, 9, 8, D, generator=torch.Generator().manual_seed(3))
+    out = node(cube=q)["scores"][0, ..., 0]
+    expected = torch.cdist(q.reshape(-1, D), node.coreset).min(1).values.reshape(9, 8)
+    assert torch.allclose(out, expected, atol=1e-5)
+    # the coreset rows are raw (unstandardised) bank members, copied verbatim (exact equality:
+    # ``torch.cdist`` would report ~sqrt(eps * |x|^2) for identical rows via its mm expansion)
+    bank = torch.cat([b["cube"].reshape(-1, D) for b in _grids()])
+    assert all((bank == row).all(dim=1).any() for row in node.coreset)
+
+
+def test_standardize_switch_changes_the_metric_on_anisotropic_channels():
+    node_z, node_raw = _fitted(), _fitted(standardize=False)
+    cube = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(8)) * 3 + 1
+    assert torch.equal(node_raw.sd, torch.ones(C))
+    assert not torch.allclose(node_z(cube=cube)["scores"], node_raw(cube=cube)["scores"])
+
+
+def test_reference_sets_output_resolution_and_topk_pool():
+    node = _fitted()
+    cube = torch.rand(2, H, W, C, generator=torch.Generator().manual_seed(12))
+    ref = torch.zeros(2, 50, 41, 3)
+    out = node(cube=cube, reference=ref)
+    assert out["scores"].shape == (2, 50, 41, 1)
+    q = node._features(cube, node.stride)
+    gh, gw = q.shape[-2:]
+    dist = node._nearest_distance(q.permute(0, 2, 3, 1).reshape(-1, C)).reshape(2, 1, gh, gw)
+    expected = F.interpolate(dist, size=(50, 41), mode="bilinear", align_corners=False)
+    assert torch.allclose(out["scores"], expected.permute(0, 2, 3, 1), atol=1e-6)
+    k = max(1, int(node.topk_frac * 50 * 41))
+    topk = torch.topk(out["scores"].reshape(2, -1), k, dim=1).values.mean(1)
+    assert torch.allclose(out["anomaly_score"], topk)
+    assert node(cube=cube)["scores"].shape == (2, H, W, 1)  # no reference: input size
+
+
+def test_reference_port_is_optional():
+    node = PatchCoreDetector(**FIT_KW)
+    assert node.INPUT_SPECS["reference"].optional is True
+    assert "reference" not in node.OUTPUT_SPECS
+
+
+def test_state_dict_layout_is_identical_in_feature_mode():
+    node = PatchCoreDetector(**GRID_KW)
+    node.statistical_initialization(iter(_grids()))
+    assert set(node.state_dict()) == {"mu", "sd", "coreset"}
+    fresh = PatchCoreDetector(**GRID_KW)
+    fresh.load_state_dict(node.state_dict())
+    assert fresh._statistically_initialized is True
+    q = torch.randn(1, 9, 8, D, generator=torch.Generator().manual_seed(5))
+    assert torch.equal(fresh(cube=q)["scores"], node(cube=q)["scores"])
+
+
+def test_feature_mode_rejects_channel_mismatch():
+    node = PatchCoreDetector(**GRID_KW)
+    with pytest.raises(ValueError, match="channels"):
+        node.statistical_initialization(iter([{"cube": torch.rand(1, 4, 4, D + 1)}]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for autocast path")
+def test_cuda_fp16_raw_features_skip_the_z_clamp():
+    """Without standardisation the +-64 clamp is not applied: features far beyond it still match."""
+    g = torch.Generator().manual_seed(4)
+    grids = [{"cube": torch.randn(1, 12, 10, D, generator=g) * 40.0} for _ in range(3)]
+    n32 = PatchCoreDetector(**GRID_KW)
+    n16 = PatchCoreDetector(**GRID_KW, autocast_dtype="float16")
+    n32.statistical_initialization(iter(grids))
+    n16.statistical_initialization(iter(grids))
+    n32, n16 = n32.cuda(), n16.cuda()
+    q = (torch.randn(1, 12, 10, D, generator=g) * 40.0).cuda()  # |x| well beyond 64
+    s32 = n32(cube=q)["scores"]
+    s16 = n16(cube=q)["scores"]
+    assert torch.isfinite(s16).all()
+    assert torch.allclose(s16, s32, rtol=2e-2, atol=2e-2 * float(s32.abs().max()))
