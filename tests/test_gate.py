@@ -1,4 +1,4 @@
-"""FrameScoreGate: gating logic, frame score, mask mode, port contract, hparam validation."""
+"""FrameScoreGate: gating, frame score, mask mode, decisions mask, port contract, hparams."""
 
 from __future__ import annotations
 
@@ -77,6 +77,54 @@ def test_port_contract():
     assert out["scores"].shape == (3, 8, 8, 1) and out["scores"].dtype == torch.float32
     assert out["frame_score"].shape == (3,) and out["frame_score"].dtype == torch.float32
     assert out["passed"].shape == (3,) and out["passed"].dtype == torch.int32
+    assert out["decisions"].shape == (3, 8, 8, 1) and out["decisions"].dtype == torch.bool
+    assert set(out) == set(FrameScoreGate.OUTPUT_SPECS)
+
+
+def test_decisions_mask_the_passing_frames_only():
+    node = FrameScoreGate(threshold=1.0, topk_frac=0.25)
+    out = node(scores=_scores())
+    assert not out["decisions"][0].any()  # clean frame: no mask
+    assert torch.equal(out["decisions"][1], _scores()[1] > 1.0)  # the 4 hot pixels
+    assert int(out["decisions"][1].sum()) == 4
+
+
+def test_decisions_use_mask_threshold_on_the_display_scale():
+    # The alarm map fires; the display map is on its own scale and masked at mask_threshold.
+    display = torch.full((1, 4, 4, 1), 0.2, dtype=torch.float32)
+    display[0, 1, :2, 0] = 0.8  # 2 pixels above 0.5
+    alarm = torch.full((1, 4, 4, 1), 5.0, dtype=torch.float32)
+    node = FrameScoreGate(threshold=1.0, topk_frac=0.25, mask_threshold=0.5)
+    out = node(scores=display, alarm_scores=alarm)
+    assert int(out["decisions"].sum()) == 2
+    assert torch.equal(out["scores"], display)  # heatmap mode still shows the display map
+
+
+def test_decisions_equal_the_binary_scores_of_mask_mode():
+    for mask_threshold in (None, 0.05):
+        node = FrameScoreGate(
+            threshold=1.0, topk_frac=0.25, mode="mask", mask_threshold=mask_threshold
+        )
+        out = node(scores=_scores())
+        assert torch.equal(out["scores"], out["decisions"].to(torch.float32))
+
+
+def test_decisions_area_follows_the_object():
+    # An absolute mask_threshold marks every hot pixel of a passing frame, however many there are.
+    x = torch.full((2, 8, 8, 1), 0.1, dtype=torch.float32)
+    x[0, 0, 0, 0] = 5.0  # small object: 1 px
+    x[1, :4, :4, 0] = 5.0  # large object: 16 px
+    node = FrameScoreGate(threshold=1.0, topk_frac=1 / 64, mask_threshold=1.0)
+    out = node(scores=x)
+    assert out["decisions"].flatten(1).sum(1).tolist() == [1, 16]
+
+
+def test_decisions_follow_the_smoothed_gate():
+    node = FrameScoreGate(threshold=1.0, topk_frac=1.0, smooth_k=3)
+    masked = []
+    for v in (0.1, 0.1, 5.0, 5.0):  # the isolated spike stays closed; the sustained one opens
+        masked.append(bool(node(scores=torch.full((1, 2, 2, 1), v))["decisions"].any()))
+    assert masked == [False, False, False, True]
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-"""ScoreMapFusion: golden rules, port contract, fan-in wiring, hparam validation."""
+"""ScoreMapFusion and DecisionFusion: golden rules, port contract, fan-in, hparam validation."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from cuvis_ai_core.pipeline.pipeline import CuvisPipeline
 from cuvis_ai_schemas.enums import ExecutionStage, NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 
-from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import DecisionFusion, ScoreMapFusion
 
 pytestmark = pytest.mark.unit
 
@@ -161,3 +161,90 @@ def test_hparams_round_trip_json():
     assert hp["mode"] == "wmean" and hp["weights"] == [2.0, 1.0]
     json.dumps(hp)
     assert ScoreMapFusion(mode="mean").hparams["weights"] is None
+
+
+# ----- 5. DecisionFusion ----------------------------------------------------------------------
+
+
+def _masks() -> tuple[torch.Tensor, torch.Tensor]:
+    a = torch.zeros(B, H, W, 1, dtype=torch.bool)
+    a[0, 0, 0, 0] = True  # frame 0 only
+    b = torch.zeros(B, H, W, 1, dtype=torch.bool)
+    b[:, 1, 1, 0] = True  # both frames
+    return a, b
+
+
+def test_decision_any_all_are_pixelwise_or_and():
+    a, b = _masks()
+    assert torch.equal(DecisionFusion(mode="any")(decisions=[a, b])["decisions"], a | b)
+    assert torch.equal(DecisionFusion(mode="all")(decisions=[a, b])["decisions"], a & b)
+
+
+def test_decision_first_takes_the_first_mask_with_a_set_pixel_per_frame():
+    a, b = _masks()
+    out = DecisionFusion(mode="first")(decisions=[a, b])["decisions"]
+    assert torch.equal(out[0], a[0])  # frame 0: a has a pixel
+    assert torch.equal(out[1], b[1])  # frame 1: a is empty, so b
+    none = torch.zeros_like(a)
+    assert not DecisionFusion(mode="first")(decisions=[none, none])["decisions"].any()
+
+
+def test_decision_single_mask_passes_through_unchanged():
+    a, _ = _masks()
+    for mode in ("any", "all", "first"):
+        assert torch.equal(DecisionFusion(mode=mode)(decisions=a)["decisions"], a)
+
+
+def test_decision_port_contract():
+    a, b = _masks()
+    out = DecisionFusion()(decisions=[a, b])
+    assert set(out) == set(DecisionFusion.OUTPUT_SPECS)
+    assert out["decisions"].shape == (B, H, W, 1) and out["decisions"].dtype == torch.bool
+
+
+def test_decision_shape_mismatch_raises():
+    a, _ = _masks()
+    with pytest.raises(ValueError):
+        DecisionFusion()(decisions=[a, torch.zeros(B, H, W + 1, 1, dtype=torch.bool)])
+
+
+class _MaskSource(Node):
+    """Module-scope test source emitting a constant mask (one pixel set, or none)."""
+
+    _category = NodeCategory.SOURCE
+    _tags = frozenset({NodeTag.TORCH})
+    INPUT_SPECS: dict[str, PortSpec] = {}
+    OUTPUT_SPECS = {"decisions": PortSpec(dtype=torch.bool, shape=(-1, -1, -1, 1))}
+
+    def __init__(self, pixel: int = -1, **kwargs) -> None:
+        super().__init__(pixel=pixel, **kwargs)
+        self.pixel = int(pixel)
+
+    def forward(self, **_) -> dict[str, torch.Tensor]:
+        m = torch.zeros(1, H * W, dtype=torch.bool)
+        if self.pixel >= 0:
+            m[0, self.pixel] = True
+        return {"decisions": m.view(1, H, W, 1)}
+
+
+def test_decision_first_follows_connection_order():
+    pipe = CuvisPipeline("decision_priority")
+    a, b, c = _MaskSource(-1, name="a"), _MaskSource(3, name="b"), _MaskSource(9, name="c")
+    fuse = DecisionFusion(mode="first", name="fuse")
+    for src in (a, b, c):  # a is empty, so b (connected before c) is taken
+        pipe.connect(src.outputs.decisions, fuse.inputs.decisions)
+    out = pipe.forward(batch={}, stage=ExecutionStage.INFERENCE)[("fuse", "decisions")]
+    assert out.flatten().nonzero().flatten().tolist() == [3]
+
+
+@pytest.mark.parametrize("bad", [{"mode": "union"}, {"mode": "mean"}])
+def test_decision_invalid_mode_raises(bad):
+    with pytest.raises(ValueError):
+        DecisionFusion(**bad)
+
+
+def test_decision_hparams_round_trip_json():
+    node = DecisionFusion(mode="first", name="dfuse")
+    assert node.hparams["mode"] == "first"
+    json.dumps(node.hparams)
+    assert DecisionFusion().hparams["mode"] == "any"

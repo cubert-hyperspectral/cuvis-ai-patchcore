@@ -3,7 +3,10 @@
 A deploy pipeline emits a continuous heatmap; a viewer shows it on every frame, including clean
 ones where the map is just low-amplitude texture. This node gates the map by the top-``topk_frac``
 mean of a per-frame alarm score: a frame whose score is at or below ``threshold`` is blanked (all
-zeros), and only above-threshold frames show their heatmap (or a binary mask).
+zeros), and only above-threshold frames show their heatmap (or a binary mask). The boolean
+``decisions`` output is the object mask of a passing frame: its pixels above ``mask_threshold``.
+Calibrated on clean frames (e.g. their highest pixel), an absolute ``mask_threshold`` gives a mask
+whose area follows the object, where a per-frame quantile would mark the same area on every frame.
 
 By default the alarm score is read from the map that is displayed. The optional ``alarm_scores``
 input alarms on a *different* map than the one shown, e.g. alarm on a robust feature bank while
@@ -75,6 +78,13 @@ class FrameScoreGate(Node):
             description="Per-frame gate [B]: 1 when the (optionally smoothed) score > threshold, "
             "else 0.",
         ),
+        "decisions": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Boolean mask, same shape as `scores`: the pixels of the display map "
+            "above `mask_threshold` (default `threshold`) on passing frames, all False on the "
+            "others. Viewers show a `decisions` port as a mask overlay.",
+        ),
     }
 
     def __init__(
@@ -98,8 +108,9 @@ class FrameScoreGate(Node):
             detectors' ``anomaly_score``); ``0.001`` = top 0.1 %.
         mode : ``"heatmap"`` passes the display map through on a passing frame; ``"mask"`` emits
             the binary ``scores > mask_threshold`` map instead. Both blank a non-passing frame.
-        mask_threshold : per-pixel cutoff of the binary map in ``mode="mask"``; defaults to
-            ``threshold``. Set it when the display map is on a different scale than the alarm map.
+        mask_threshold : per-pixel cutoff of ``decisions`` and, in ``mode="mask"``, of the binary
+            ``scores``; defaults to ``threshold``. Set it on the display map's own scale, e.g. to
+            the highest pixel of the session's clean frames.
         log_scores : log each frame's raw score, threshold and gate decision at INFO (read the
             server log during a session to find the clean band). Off in production.
         smooth_k : gate on a rolling median of the last ``smooth_k`` frame scores (default 1 = no
@@ -156,9 +167,10 @@ class FrameScoreGate(Node):
             gate_score = frame
 
         passed = gate_score > self.threshold  # [B] bool
-        gate = passed.to(scores.dtype).reshape(scores.shape[0], *([1] * (scores.ndim - 1)))
+        gate = passed.reshape(scores.shape[0], *([1] * (scores.ndim - 1)))
         thr = self.threshold if self.mask_threshold is None else self.mask_threshold
-        base = (scores > thr).to(scores.dtype) if self.mode == "mask" else scores
+        hot = scores > thr  # [B, H, W, C] bool
+        base = hot.to(scores.dtype) if self.mode == "mask" else scores
 
         if self.log_scores:
             name = getattr(self, "name", None) or type(self).__name__
@@ -170,7 +182,8 @@ class FrameScoreGate(Node):
                 )
 
         return {
-            "scores": base * gate,
+            "scores": base * gate.to(scores.dtype),
             "frame_score": frame.to(torch.float32),
             "passed": passed.to(torch.int32),
+            "decisions": hot & gate,
         }

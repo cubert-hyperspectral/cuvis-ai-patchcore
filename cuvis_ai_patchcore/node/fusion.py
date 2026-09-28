@@ -7,6 +7,10 @@ priority rule for gated maps: per frame it takes the first inbound map that is n
 one detector's display map whenever its gate opens and a second detector's only on frames the first
 misses. The node is stateless, torch-native and differentiable. Feed it maps on a common scale (a
 fitted normalizer per detector), otherwise the detector with the widest range dominates.
+
+``DecisionFusion`` is the counterpart for boolean masks (e.g. the ``decisions`` of several
+``FrameScoreGate`` nodes): ``any`` / ``all`` combine them pixel-wise, ``first`` takes per frame the
+first inbound mask with a set pixel, the mask of the map a ``first`` score fusion displays.
 """
 
 from __future__ import annotations
@@ -106,3 +110,67 @@ class ScoreMapFusion(Node):
             w = (w / w.sum()).view(-1, 1, 1, 1, 1)
             out = (stack * w).sum(dim=0)
         return {"scores": out}
+
+
+_DECISION_MODES = ("any", "all", "first")
+
+
+class DecisionFusion(Node):
+    """Fuse N boolean masks [B, H, W, C] into one by ``mode`` (any | all | first)."""
+
+    _category = NodeCategory.TRANSFORM
+    _tags = frozenset({NodeTag.MASK, NodeTag.TORCH})
+
+    INPUT_SPECS = {
+        "decisions": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            variadic=True,
+            description="Boolean masks [B, H, W, C] of identical shape, one per inbound connection "
+            "(fan-in), e.g. the `decisions` of several gates.",
+        ),
+    }
+    OUTPUT_SPECS = {
+        "decisions": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Fused mask [B, H, W, C] per ``mode``.",
+        ),
+    }
+
+    def __init__(self, mode: str = "any", **kwargs: Any) -> None:
+        """Create a mask fusion node.
+
+        Parameters
+        ----------
+        mode : ``"any"`` (pixel-wise OR), ``"all"`` (pixel-wise AND) or ``"first"`` (per frame, the
+            first inbound mask in connection order with a set pixel; all False if none has one).
+        """
+        if mode not in _DECISION_MODES:
+            raise ValueError(
+                f"DecisionFusion: mode must be one of {_DECISION_MODES}, got {mode!r}."
+            )
+        self.mode = mode
+        super().__init__(mode=self.mode, **kwargs)
+
+    def forward(self, decisions: list[Tensor] | Tensor, **_: Any) -> dict[str, Tensor]:
+        """Return the fused mask; every inbound mask must share one shape."""
+        masks = list(decisions) if isinstance(decisions, (list, tuple)) else [decisions]
+        if not masks:
+            raise ValueError("DecisionFusion: no masks connected.")
+        shape = masks[0].shape
+        for i, m in enumerate(masks[1:], start=1):
+            if m.shape != shape:
+                raise ValueError(
+                    f"DecisionFusion: mask {i} has shape {tuple(m.shape)}, expected {tuple(shape)}."
+                )
+        stack = torch.stack(masks, dim=0)  # [N, B, H, W, C]
+        if self.mode == "any":
+            out = stack.any(dim=0)
+        elif self.mode == "all":
+            out = stack.all(dim=0)
+        else:  # first: per frame, the first mask with a set pixel
+            live = stack.flatten(start_dim=2).any(dim=2)  # [N, B]
+            pick = live.to(torch.int64).argmax(dim=0)  # [B]: first live mask (0 when none is live)
+            out = stack[pick, torch.arange(stack.shape[1], device=stack.device)]
+        return {"decisions": out}

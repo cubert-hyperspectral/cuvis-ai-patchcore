@@ -17,7 +17,7 @@ from cuvis_ai_schemas.execution import Context
 from cuvis_ai_schemas.pipeline import PortSpec
 
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
-from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import DecisionFusion, ScoreMapFusion
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
@@ -240,8 +240,9 @@ def test_calibrated_two_bank_fusion_pipeline_reloads(tmp_path):
 
 
 def test_gated_priority_display_pipeline_reloads(tmp_path):
-    """Gates -> ScoreMapFusion(mode="first"): the gate hparams, the alarm_scores wiring and the
-    variadic connection order (which `first` depends on) survive save -> load."""
+    """Gates -> ScoreMapFusion(mode="first") and DecisionFusion(mode="first"): the gate hparams,
+    the alarm_scores wiring and the variadic connection order (which `first` depends on) survive
+    save -> load."""
     src = _ConstantCubeSource(seed=5, name="src")
     pc = PatchCoreDetector(
         input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
@@ -255,6 +256,7 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     gate_a = FrameScoreGate(threshold=0.0, topk_frac=0.01, name="gate_a")
     gate_b = FrameScoreGate(threshold=0.0, mode="mask", mask_threshold=0.5, name="gate_b")
     fuse = ScoreMapFusion(mode="first", name="fuse")
+    masks = DecisionFusion(mode="first", name="masks")
     pipe = CuvisPipeline("gated_priority_display_smoke")
     pipe.connect(src.outputs.cube, pc.inputs.cube)
     pipe.connect(pc.outputs.scores, cal.inputs.scores)
@@ -264,6 +266,7 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     pipe.connect(cal.outputs.normalized, gate_b.inputs.scores)
     for gate in (blank, gate_a, gate_b):
         pipe.connect(gate.outputs.scores, fuse.inputs.scores)
+        pipe.connect(gate.outputs.decisions, masks.inputs.decisions)
 
     ctx = Context(stage=ExecutionStage.INFERENCE)
     before = pipe.forward(batch={}, context=ctx)
@@ -273,6 +276,10 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     ].tolist() == [1]
     assert torch.equal(before[("fuse", "scores")], before[("gate_a", "scores")])
     assert not torch.equal(before[("gate_a", "scores")], before[("gate_b", "scores")])
+    # the mask of the displayed gate: gate_blank has none, gate_a's comes first
+    assert not before[("gate_blank", "decisions")].any()
+    assert before[("gate_a", "decisions")].any()
+    assert torch.equal(before[("masks", "decisions")], before[("gate_a", "decisions")])
 
     yaml_path = tmp_path / "gated.yaml"
     pipe.save_to_file(str(yaml_path))
@@ -297,3 +304,5 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     for key in (("gate_a", "frame_score"), ("gate_b", "scores"), ("fuse", "scores")):
         assert torch.allclose(after[key], before[key], atol=1e-6), key
     assert torch.equal(after[("fuse", "scores")], after[("gate_a", "scores")])
+    assert nodes["masks"].hparams["mode"] == "first"
+    assert torch.equal(after[("masks", "decisions")], before[("masks", "decisions")])
