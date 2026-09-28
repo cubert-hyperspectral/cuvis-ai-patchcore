@@ -233,6 +233,7 @@ def test_hparams_are_json_serializable_and_complete():
         "topk_frac",
         "chunk_size",
         "autocast_dtype",
+        "tf32",
         "standardize",
         "seed",
         "eps",
@@ -402,3 +403,23 @@ def test_cuda_fp16_raw_features_skip_the_z_clamp():
     s16 = n16(cube=q)["scores"]
     assert torch.isfinite(s16).all()
     assert torch.allclose(s16, s32, rtol=2e-2, atol=2e-2 * float(s32.abs().max()))
+
+
+def test_tf32_is_a_no_op_on_cpu_and_restores_the_process_setting():
+    ref, tf = _fitted(), _fitted(tf32=True)
+    assert tf.hparams["tf32"] is True and ref.hparams["tf32"] is False
+    before = torch.get_float32_matmul_precision()
+    cube = _stream(1, seed=9)[0]["cube"]
+    a, b = ref(cube=cube), tf(cube=cube)
+    assert torch.get_float32_matmul_precision() == before
+    assert torch.equal(a["scores"], b["scores"]) and torch.equal(
+        a["anomaly_score"], b["anomaly_score"]
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for TF32")
+def test_tf32_on_cuda_stays_close_to_fp32():
+    ref, tf = _fitted().cuda(), _fitted(tf32=True).cuda()
+    cube = _stream(1, seed=9)[0]["cube"].cuda()
+    a, b = ref(cube=cube), tf(cube=cube)
+    assert torch.allclose(b["scores"], a["scores"], rtol=1e-2, atol=1e-2)

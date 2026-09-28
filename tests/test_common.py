@@ -7,7 +7,13 @@ import pytest
 import torch
 from cuvis_ai_core.node.metric_utils import subsample_hw
 
-from cuvis_ai_patchcore.node._common import check_topk_frac, random_cap, require_fitted, topk_mean
+from cuvis_ai_patchcore.node._common import (
+    check_topk_frac,
+    random_cap,
+    require_fitted,
+    tf32_matmul,
+    topk_mean,
+)
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
@@ -88,3 +94,13 @@ def test_core_subsample_matches_the_strided_slice(stride):
     # ScoreRangeNormalizer thins its Phase-1 values with core's subsample_hw; pin it to the slice
     x = torch.rand(2, 11, 9, 3, generator=torch.Generator().manual_seed(stride))
     assert torch.equal(subsample_hw(x, stride), x[:, ::stride, ::stride, :])
+
+
+def test_tf32_matmul_sets_and_restores_the_precision_also_on_error():
+    before = torch.get_float32_matmul_precision()
+    with tf32_matmul(False):
+        assert torch.get_float32_matmul_precision() == before
+    with pytest.raises(RuntimeError), tf32_matmul(True):
+        assert torch.get_float32_matmul_precision() == "high"
+        raise RuntimeError("boom")
+    assert torch.get_float32_matmul_precision() == before

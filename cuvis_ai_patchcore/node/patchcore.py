@@ -42,7 +42,13 @@ from cuvis_ai_schemas.enums import NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 from torch import Tensor
 
-from cuvis_ai_patchcore.node._common import check_topk_frac, random_cap, require_fitted, topk_mean
+from cuvis_ai_patchcore.node._common import (
+    check_topk_frac,
+    random_cap,
+    require_fitted,
+    tf32_matmul,
+    topk_mean,
+)
 from cuvis_ai_patchcore.sampling import k_center_greedy
 from cuvis_ai_patchcore.streaming_stats import StreamingMeanVar
 
@@ -114,6 +120,7 @@ class PatchCoreDetector(Node):
         topk_frac: float = 0.001,
         chunk_size: int = 4096,
         autocast_dtype: str | None = None,
+        tf32: bool = False,
         standardize: bool = True,
         seed: int = 0,
         eps: float = 1e-6,
@@ -138,6 +145,9 @@ class PatchCoreDetector(Node):
         chunk_size : query rows per ``torch.cdist`` call (memory / speed trade-off).
         autocast_dtype : ``None`` (float32), ``"float16"`` or ``"bfloat16"`` — reduced-precision
             nearest-neighbour search, applied on CUDA inputs only (CPU always runs float32).
+        tf32 : allow TF32 tensor-core matmuls in the float32 nearest-neighbour search (float32
+            storage and accumulation), set around the search and restored afterwards. CUDA inputs
+            only; ignored when ``autocast_dtype`` is set.
         standardize : z-score every channel with statistics fitted in Phase 1 (``True``, the
             spectral setting) or use the input features unchanged (``False``, for deep feature
             grids that are already on a common scale).
@@ -185,6 +195,7 @@ class PatchCoreDetector(Node):
         self.topk_frac = float(topk_frac)
         self.chunk_size = int(chunk_size)
         self.autocast_dtype = autocast_dtype
+        self.tf32 = bool(tf32)
         self.standardize = bool(standardize)
         self.seed = int(seed)
         self.eps = float(eps)
@@ -201,6 +212,7 @@ class PatchCoreDetector(Node):
             topk_frac=self.topk_frac,
             chunk_size=self.chunk_size,
             autocast_dtype=self.autocast_dtype,
+            tf32=self.tf32,
             standardize=self.standardize,
             seed=self.seed,
             eps=self.eps,
@@ -252,9 +264,10 @@ class PatchCoreDetector(Node):
             bank = (bank * _HALF_SCALE).to(self._nn_dtype)
             rescale = 1.0 / _HALF_SCALE
         out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
-        for i in range(0, flat.shape[0], self.chunk_size):
-            chunk = flat[i : i + self.chunk_size]
-            out[i : i + chunk.shape[0]] = torch.cdist(chunk, bank).min(dim=1).values.float()
+        with tf32_matmul(self.tf32 and flat.is_cuda and self._nn_dtype is None):
+            for i in range(0, flat.shape[0], self.chunk_size):
+                chunk = flat[i : i + self.chunk_size]
+                out[i : i + chunk.shape[0]] = torch.cdist(chunk, bank).min(dim=1).values.float()
         return out * rescale if rescale != 1.0 else out
 
     # ------------------------------------------------------------------ phase 1
