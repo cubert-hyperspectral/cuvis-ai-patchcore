@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- Added a boolean `decisions` output to `FrameScoreGate`: the pixels of the display map above
+  `mask_threshold` (default `threshold`) on passing frames, all False on the others, as an object
+  mask a viewer can overlay. `mask_threshold` now also sets this mask in `heatmap` mode; the other
+  outputs are unchanged. On the walnut FO pipelines, a `mask_threshold` at the highest pixel of the
+  session's clean frames gives a mask whose area follows the object (fake shells IoU 0.50-0.74,
+  against 0.08-0.13 for a fixed top-0.5 % mask) and that stays empty on clean frames.
+- Added `DecisionFusion`: combines N boolean masks by `any`, `all` or `first` (per frame the first
+  mask with a set pixel, the mask of the map a `ScoreMapFusion(mode="first")` displays).
+
 ## 0.2.0 - 2026-09-28
 
 ### Added

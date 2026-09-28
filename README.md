@@ -12,14 +12,15 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships four nodes:
+The plugin ships five nodes:
 
 | Node | Role |
 |---|---|
 | [`PatchCoreDetector`](#patchcoredetector) | memory-bank detector on spectra or any dense feature grid (Phase-1 fitted) |
 | [`ScoreRangeNormalizer`](#scorerangenormalizer) | puts one detector's map on its normal range before fusion (Phase-1 fitted) |
 | [`ScoreMapFusion`](#scoremapfusion) | fuses N maps: mean, min, max, weighted mean, or a priority rule for gated maps |
-| [`FrameScoreGate`](#framescoregate) | blanks a map on frames whose top-k score stays at or below a threshold |
+| [`FrameScoreGate`](#framescoregate) | blanks a map on frames whose top-k score stays at or below a threshold; emits the object mask |
+| [`DecisionFusion`](#decisionfusion) | fuses N boolean masks: any, all, or the priority rule of `ScoreMapFusion` |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -135,17 +136,38 @@ fusion map.
 | `scores` | out | `[B, H, W, C]` float32 | display map (or its `mask_threshold` binary mask) on passing frames, zeros otherwise |
 | `frame_score` | out | `[B]` float32 | raw per-frame alarm score |
 | `passed` | out | `[B]` int32 | 1 when the (smoothed) score > `threshold` |
+| `decisions` | out | `[B, H, W, C]` bool | object mask: display-map pixels above `mask_threshold` on passing frames, all False otherwise |
 
 hparams: `threshold` (required; set above the session's clean band) · `topk_frac` 0.001 · `mode`
-`heatmap` | `mask` · `mask_threshold` (default `threshold`) · `log_scores` false (log every frame
-decision at INFO, for calibrating on a live session) · `smooth_k` 1 (> 1: gate on the rolling median
-of the last k frame scores; runtime state, one frame per forward). Stateless otherwise: the
-threshold is a hyper-parameter, not a fitted buffer, because the operating point drifts with the
-session.
+`heatmap` | `mask` · `mask_threshold` (default `threshold`; the cutoff of `decisions`, and of
+`scores` in `mask` mode) · `log_scores` false (log every frame decision at INFO, for calibrating on a
+live session) · `smooth_k` 1 (> 1: gate on the rolling median of the last k frame scores; runtime
+state, one frame per forward). Stateless otherwise: the thresholds are hyper-parameters, not fitted
+buffers, because the operating point drifts with the session.
+
+**Object mask.** Set `mask_threshold` on the display map's own scale, e.g. to the highest pixel of
+the session's clean frames. The mask then marks the pixels above anything a clean frame produced:
+its area follows the object, and it stays empty on clean frames even if the gate is bypassed. A
+per-frame quantile (the top q of the pixels) marks the same area on every frame instead, too small
+for a large object and spread over texture on a small one. `decisions` is a port name that viewers
+such as cuvis.next overlay as a mask.
 
 Two gates fused by `ScoreMapFusion(mode="first")` make an OR alarm with a priority display: each
 gate alarms on its own detector, and the output shows the first detector's map whenever its gate
-opens, the second detector's map only on frames the first gate misses.
+opens, the second detector's map only on frames the first gate misses. Their `decisions` fused by
+`DecisionFusion(mode="first")` give the mask of the displayed map.
+
+## DecisionFusion
+
+`cuvis_ai_patchcore.node.fusion.DecisionFusion` — fuse N boolean masks into one.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in, variadic | `[B, H, W, C]` bool | one inbound connection per mask; all masks share one shape |
+| `decisions` | out | `[B, H, W, C]` bool | fused mask |
+
+`mode`: `any` (default, pixel-wise OR) · `all` (pixel-wise AND) · `first`: per frame, the first
+inbound mask (in connection order) with a set pixel, all False when none has one. Stateless.
 
 ## Install
 
@@ -161,6 +183,7 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
+  - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
 ```
 
 For a frozen, reproducible install, pin a release tag instead:
@@ -168,13 +191,14 @@ For a frozen, reproducible install, pin a release tag instead:
 ```yaml
 name: patchcore
 repo: "https://github.com/cubert-hyperspectral/cuvis-ai-patchcore.git"
-tag: "v0.1.0"
+tag: "v0.3.0"
 package_name: cuvis-ai-patchcore
 capabilities:
   - class_name: cuvis_ai_patchcore.node.patchcore.PatchCoreDetector
   - class_name: cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
+  - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
 ```
 
 [`plugins.yaml`](plugins.yaml) is the local-path manifest of this repository, with the palette
