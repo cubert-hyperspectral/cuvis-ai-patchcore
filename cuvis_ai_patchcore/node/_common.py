@@ -4,9 +4,13 @@
   so a detector's ``anomaly_score`` and a gate's ``frame_score`` on the same map agree exactly.
 - :func:`random_cap` is the seeded row cap both Phase-1 fits use to bound memory.
 - :func:`require_fitted` is the Phase-1 guard of the fitted nodes' ``forward``.
+- :func:`tf32_matmul` allows TF32 tensor-core matmuls inside a block, then restores the setting.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 from cuvis_ai_core.node.node import Node
@@ -50,3 +54,17 @@ def require_fitted(node: Node) -> None:
             f"{type(node).__name__} requires statistical_initialization() (Phase 1) or "
             "loaded weights before forward()."
         )
+
+
+@contextmanager
+def tf32_matmul(enabled: bool) -> Iterator[None]:
+    """Allow TF32 tensor-core matmuls inside the block and restore the process setting after it."""
+    if not enabled:
+        yield
+        return
+    previous = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("high")
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(previous)

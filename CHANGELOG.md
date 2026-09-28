@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- Added `tf32` to `PatchCoreDetector`: TF32 tensor-core matmuls in the float32 nearest-neighbour
+  search (float32 storage and accumulation), set around the search and restored afterwards;
+  ignored under `autocast_dtype`. On Jetson Thor it halves the 48 x 48 feature bank
+  (9.6 -> 4.5 ms).
+
 ## 0.1.1 - 2026-09-28
 
 ### Fixed
