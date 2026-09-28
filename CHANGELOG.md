@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.2.0 - 2026-09-28
+
 ### Added
 - Added `tf32` to `PatchCoreDetector`: TF32 tensor-core matmuls in the float32 nearest-neighbour
   search (float32 storage and accumulation), set around the search and restored afterwards;
