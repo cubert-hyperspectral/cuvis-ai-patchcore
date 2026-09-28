@@ -8,6 +8,10 @@
   base torch requirement is declared once per index fork, as in cuvis-ai. The v0.1.0 release
   workflow failed on this; installing the v0.1.0 tag as a git or path dependency is not affected.
 
+### Added
+- Added a CI step that resolves the project with its index sources (`uv lock --dry-run`) and a
+  guard test that the base requirements follow the fork markers.
+
 ## 0.1.0 - 2026-09-28
 
 ### Added
