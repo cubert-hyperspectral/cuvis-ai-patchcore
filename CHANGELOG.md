@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## 0.1.0 - 2026-09-25
+## 0.1.0 - 2026-09-28
 
 ### Added
 - Added `PatchCoreDetector`, HSI-PatchCore: per-band z-scored spectra, `pool_size`×`pool_size`
