@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.3.0 - 2026-09-28
+
 ### Added
 - Added a boolean `decisions` output to `FrameScoreGate`: the pixels of the display map above
   `mask_threshold` (default `threshold`) on passing frames, all False on the others, as an object
