@@ -12,7 +12,7 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships five nodes:
+The plugin ships six nodes:
 
 | Node | Role |
 |---|---|
@@ -21,6 +21,7 @@ The plugin ships five nodes:
 | [`ScoreMapFusion`](#scoremapfusion) | fuses N maps: mean, min, max, weighted mean, or a priority rule for gated maps |
 | [`FrameScoreGate`](#framescoregate) | blanks a map on frames whose top-k score stays at or below a threshold; emits the object mask |
 | [`DecisionFusion`](#decisionfusion) | fuses N boolean masks: any, all, or the priority rule of `ScoreMapFusion` |
+| [`MaskComposite`](#maskcomposite) | merges N boolean masks into one label map and one level map for display |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -169,6 +170,25 @@ opens, the second detector's map only on frames the first gate misses. Their `de
 `mode`: `any` (default, pixel-wise OR) · `all` (pixel-wise AND) · `first`: per frame, the first
 inbound mask (in connection order) with a set pixel, all False when none has one. Stateless.
 
+## MaskComposite
+
+`cuvis_ai_patchcore.node.fusion.MaskComposite` — merge N boolean masks into one output, e.g. the
+shells of a segmentation and the object mask of an anomaly gate in one view.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in, variadic | `[B, H, W, C]` bool | one inbound connection per mask, in the order of `labels` / `levels`; one B, H, W |
+| `mask` | out | `[B, H, W]` int32 | label map: 0 where no mask is set, else the largest label among the masks set there |
+| `scores` | out | `[B, H, W, 1]` float32 | level map: 0 where no mask is set, else the largest level among the masks set there |
+
+`labels` (default `[1, 2]`, integers >= 1) and `levels` (default `[0.5, 1.0]`, finite, >= 0): one
+per mask. Where masks overlap the largest entry wins, so the mask that should stay on top gets the
+largest one. A mask with several channels counts where any channel is set. Stateless.
+
+Viewers show a `mask` port as a label mask and a `scores` port as a heatmap. A port another node
+consumes is not a terminal output any more, so a pipeline that also wants the single masks shown
+adds a copy of them, e.g. `DecisionFusion` over one mask.
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
@@ -184,6 +204,7 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
   - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
+  - class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
 ```
 
 For a frozen, reproducible install, pin a release tag instead:
@@ -199,6 +220,7 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
   - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
+  - class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
 ```
 
 [`plugins.yaml`](plugins.yaml) is the local-path manifest of this repository, with the palette

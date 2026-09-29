@@ -11,7 +11,7 @@ from cuvis_ai_core.pipeline.pipeline import CuvisPipeline
 from cuvis_ai_schemas.enums import ExecutionStage, NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 
-from cuvis_ai_patchcore.node.fusion import DecisionFusion, ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
 
 pytestmark = pytest.mark.unit
 
@@ -248,3 +248,92 @@ def test_decision_hparams_round_trip_json():
     assert node.hparams["mode"] == "first"
     json.dumps(node.hparams)
     assert DecisionFusion().hparams["mode"] == "any"
+
+
+# ----- 6. MaskComposite -----------------------------------------------------------------------
+
+
+def test_composite_labels_and_levels_largest_wins_on_overlap():
+    shell = torch.zeros(B, H, W, 1, dtype=torch.bool)
+    shell[:, 0:2, 0:3, 0] = True
+    fo = torch.zeros(B, H, W, 1, dtype=torch.bool)
+    fo[0, 1:3, 2:4, 0] = True  # overlaps the shell at (1, 2) in frame 0 only
+    out = MaskComposite(labels=[1, 2], levels=[0.5, 1.0])(decisions=[shell, fo])
+    exp_mask = torch.zeros(B, H, W, dtype=torch.int32)
+    exp_mask[:, 0:2, 0:3] = 1
+    exp_mask[0, 1:3, 2:4] = 2
+    exp_level = torch.zeros(B, H, W, 1)
+    exp_level[:, 0:2, 0:3, 0] = 0.5
+    exp_level[0, 1:3, 2:4, 0] = 1.0
+    assert torch.equal(out["mask"], exp_mask)
+    assert torch.equal(out["scores"], exp_level)
+    # the order of the lists, not of the masks' size, decides: a larger label on the first mask wins
+    flipped = MaskComposite(labels=[2, 1], levels=[1.0, 0.5])(decisions=[shell, fo])
+    assert int(flipped["mask"][0, 1, 2]) == 2 and float(flipped["scores"][0, 1, 2, 0]) == 1.0
+
+
+def test_composite_defaults_are_shell_1_fo_2():
+    node = MaskComposite()
+    assert node.labels == [1, 2] and node.levels == [0.5, 1.0]
+    empty = torch.zeros(B, H, W, 1, dtype=torch.bool)
+    out = node(decisions=[empty, empty])
+    assert not out["mask"].any() and not out["scores"].any()
+
+
+def test_composite_counts_a_pixel_where_any_channel_is_set():
+    m = torch.zeros(B, H, W, 2, dtype=torch.bool)
+    m[0, 2, 3, 1] = True
+    out = MaskComposite(labels=[4], levels=[0.25])(decisions=m)
+    assert out["mask"].flatten().nonzero().flatten().tolist() == [2 * W + 3]
+    assert float(out["scores"][0, 2, 3, 0]) == 0.25
+
+
+def test_composite_port_contract():
+    a, b = _masks()
+    out = MaskComposite()(decisions=[a, b])
+    assert set(out) == set(MaskComposite.OUTPUT_SPECS)
+    assert out["mask"].shape == (B, H, W) and out["mask"].dtype == torch.int32
+    assert out["scores"].shape == (B, H, W, 1) and out["scores"].dtype == torch.float32
+
+
+def test_composite_mask_count_and_shape_mismatch_raise():
+    a, b = _masks()
+    with pytest.raises(ValueError):
+        MaskComposite()(decisions=[a])  # two labels configured, one mask connected
+    with pytest.raises(ValueError):
+        MaskComposite()(decisions=[a, torch.zeros(B, H, W + 1, 1, dtype=torch.bool)])
+
+
+def test_composite_labels_follow_connection_order():
+    pipe = CuvisPipeline("composite_order")
+    a, b = _MaskSource(3, name="a"), _MaskSource(9, name="b")
+    comp = MaskComposite(labels=[1, 2], levels=[0.5, 1.0], name="comp")
+    for src in (a, b):
+        pipe.connect(src.outputs.decisions, comp.inputs.decisions)
+    out = pipe.forward(batch={}, stage=ExecutionStage.INFERENCE)
+    mask = out[("comp", "mask")].flatten()
+    assert int(mask[3]) == 1 and int(mask[9]) == 2 and int(mask.count_nonzero()) == 2
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"labels": [], "levels": []},
+        {"labels": [1, 2], "levels": [1.0]},
+        {"labels": [0, 2]},
+        {"labels": [1, True]},
+        {"labels": [1.5, 2]},
+        {"levels": [-0.1, 1.0]},
+        {"levels": [0.5, float("nan")]},
+        {"levels": [0.5, float("inf")]},
+    ],
+)
+def test_composite_invalid_hparams_raise(bad):
+    with pytest.raises(ValueError):
+        MaskComposite(**bad)
+
+
+def test_composite_hparams_round_trip_json():
+    node = MaskComposite(labels=[1, 2], levels=[0.4, 1.0], name="comp")
+    assert node.hparams["labels"] == [1, 2] and node.hparams["levels"] == [0.4, 1.0]
+    json.dumps(node.hparams)

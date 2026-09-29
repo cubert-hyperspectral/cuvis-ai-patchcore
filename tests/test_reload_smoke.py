@@ -17,7 +17,7 @@ from cuvis_ai_schemas.execution import Context
 from cuvis_ai_schemas.pipeline import PortSpec
 
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
-from cuvis_ai_patchcore.node.fusion import DecisionFusion, ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
@@ -257,6 +257,7 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     gate_b = FrameScoreGate(threshold=0.0, mode="mask", mask_threshold=0.5, name="gate_b")
     fuse = ScoreMapFusion(mode="first", name="fuse")
     masks = DecisionFusion(mode="first", name="masks")
+    comp = MaskComposite(labels=[1, 2, 3], levels=[0.25, 0.5, 1.0], name="comp")
     pipe = CuvisPipeline("gated_priority_display_smoke")
     pipe.connect(src.outputs.cube, pc.inputs.cube)
     pipe.connect(pc.outputs.scores, cal.inputs.scores)
@@ -267,6 +268,7 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     for gate in (blank, gate_a, gate_b):
         pipe.connect(gate.outputs.scores, fuse.inputs.scores)
         pipe.connect(gate.outputs.decisions, masks.inputs.decisions)
+        pipe.connect(gate.outputs.decisions, comp.inputs.decisions)
 
     ctx = Context(stage=ExecutionStage.INFERENCE)
     before = pipe.forward(batch={}, context=ctx)
@@ -280,6 +282,13 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     assert not before[("gate_blank", "decisions")].any()
     assert before[("gate_a", "decisions")].any()
     assert torch.equal(before[("masks", "decisions")], before[("gate_a", "decisions")])
+    # composite: gate_a -> 2, gate_b -> 3 (on top), gate_blank never set
+    exp = torch.where(
+        before[("gate_b", "decisions")][..., 0],
+        3,
+        torch.where(before[("gate_a", "decisions")][..., 0], 2, 0),
+    ).to(torch.int32)
+    assert torch.equal(before[("comp", "mask")], exp)
 
     yaml_path = tmp_path / "gated.yaml"
     pipe.save_to_file(str(yaml_path))
@@ -306,3 +315,7 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     assert torch.equal(after[("fuse", "scores")], after[("gate_a", "scores")])
     assert nodes["masks"].hparams["mode"] == "first"
     assert torch.equal(after[("masks", "decisions")], before[("masks", "decisions")])
+    assert nodes["comp"].hparams["labels"] == [1, 2, 3]
+    assert nodes["comp"].hparams["levels"] == [0.25, 0.5, 1.0]
+    for key in (("comp", "mask"), ("comp", "scores")):
+        assert torch.equal(after[key], before[key]), key

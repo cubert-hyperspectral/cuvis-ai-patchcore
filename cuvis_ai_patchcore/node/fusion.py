@@ -11,6 +11,9 @@ fitted normalizer per detector), otherwise the detector with the widest range do
 ``DecisionFusion`` is the counterpart for boolean masks (e.g. the ``decisions`` of several
 ``FrameScoreGate`` nodes): ``any`` / ``all`` combine them pixel-wise, ``first`` takes per frame the
 first inbound mask with a set pixel, the mask of the map a ``first`` score fusion displays.
+
+``MaskComposite`` merges several boolean masks for display: a label map (e.g. 1 = shell, 2 = foreign
+object) and a level map, so that one output shows what separate masks showed one at a time.
 """
 
 from __future__ import annotations
@@ -174,3 +177,91 @@ class DecisionFusion(Node):
             pick = live.to(torch.int64).argmax(dim=0)  # [B]: first live mask (0 when none is live)
             out = stack[pick, torch.arange(stack.shape[1], device=stack.device)]
         return {"decisions": out}
+
+
+class MaskComposite(Node):
+    """Merge N boolean masks [B, H, W, C] into one label map and one level map for display."""
+
+    _category = NodeCategory.TRANSFORM
+    _tags = frozenset({NodeTag.MASK, NodeTag.TORCH})
+
+    INPUT_SPECS = {
+        "decisions": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            variadic=True,
+            description="Boolean masks [B, H, W, C] of one batch, height and width, one per "
+            "inbound connection (fan-in), in the order of `labels` / `levels`; a pixel of a mask "
+            "counts as set where any of its channels is.",
+        ),
+    }
+    OUTPUT_SPECS = {
+        "mask": PortSpec(
+            dtype=torch.int32,
+            shape=(-1, -1, -1),
+            description="Label map [B, H, W]: 0 where no mask is set, else the largest `labels` "
+            "entry among the masks set there.",
+        ),
+        "scores": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, 1),
+            description="Level map [B, H, W, 1]: 0 where no mask is set, else the largest `levels` "
+            "entry among the masks set there.",
+        ),
+    }
+
+    def __init__(
+        self, labels: list[int] | None = None, levels: list[float] | None = None, **kwargs: Any
+    ) -> None:
+        """Create a mask composite.
+
+        Parameters
+        ----------
+        labels : one positive integer label per inbound mask, in connection order (default
+            ``[1, 2]``). Where masks overlap the largest label wins, so give the mask that should
+            stay visible on top (e.g. a foreign object on a shell) the largest one.
+        levels : one non-negative level per inbound mask, in connection order (default
+            ``[0.5, 1.0]``); where masks overlap the largest level wins.
+        """
+        labels = [1, 2] if labels is None else list(labels)
+        levels = [0.5, 1.0] if levels is None else list(levels)
+        if not labels or len(labels) != len(levels):
+            raise ValueError(
+                "MaskComposite: labels and levels need one entry per mask, "
+                f"got {labels!r} / {levels!r}."
+            )
+        if any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in labels):
+            raise ValueError(f"MaskComposite: labels must be integers >= 1, got {labels!r}.")
+        if any(
+            isinstance(x, bool)
+            or not isinstance(x, (int, float))
+            or not 0.0 <= float(x) < float("inf")
+            for x in levels
+        ):
+            raise ValueError(f"MaskComposite: levels must be finite numbers >= 0, got {levels!r}.")
+        self.labels = [int(x) for x in labels]
+        self.levels = [float(x) for x in levels]
+        super().__init__(labels=self.labels, levels=self.levels, **kwargs)
+
+    def forward(self, decisions: list[Tensor] | Tensor, **_: Any) -> dict[str, Tensor]:
+        """Return the label map and the level map of the inbound masks."""
+        masks = list(decisions) if isinstance(decisions, (list, tuple)) else [decisions]
+        if len(masks) != len(self.labels):
+            raise ValueError(
+                f"MaskComposite: {len(masks)} masks connected, "
+                f"{len(self.labels)} labels configured."
+            )
+        bhw = masks[0].shape[:3]
+        for i, m in enumerate(masks[1:], start=1):
+            if m.shape[:3] != bhw:
+                raise ValueError(
+                    f"MaskComposite: mask {i} is [B, H, W] = {tuple(m.shape[:3])}, "
+                    f"expected {tuple(bhw)}."
+                )
+        stack = torch.stack([m.any(dim=-1) for m in masks], dim=0)  # [N, B, H, W]
+        dev = stack.device
+        labels = torch.tensor(self.labels, dtype=torch.int32, device=dev).view(-1, 1, 1, 1)
+        levels = torch.tensor(self.levels, dtype=torch.float32, device=dev).view(-1, 1, 1, 1)
+        label_map = (stack.to(torch.int32) * labels).amax(dim=0)
+        level_map = (stack.to(torch.float32) * levels).amax(dim=0).unsqueeze(-1)
+        return {"mask": label_map, "scores": level_map}

@@ -13,6 +13,9 @@
   against 0.08-0.13 for a fixed top-0.5 % mask) and that stays empty on clean frames.
 - Added `DecisionFusion`: combines N boolean masks by `any`, `all` or `first` (per frame the first
   mask with a set pixel, the mask of the map a `ScoreMapFusion(mode="first")` displays).
+- Added `MaskComposite`: merges N boolean masks into one label map (`mask`, int32) and one level
+  map (`scores`), e.g. shells = 1 and foreign objects = 2 in one view; where masks overlap the largest
+  label / level wins.
 
 ## 0.2.0 - 2026-09-28
 
