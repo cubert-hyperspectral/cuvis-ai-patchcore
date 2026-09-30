@@ -14,8 +14,9 @@ displaying a sharper fusion map. The node is a stateless post-processor: ``thres
 hyper-parameter tuned per session (the operating point drifts with illumination), not a fitted
 buffer.
 
-Live calibration helpers: ``log_scores`` logs the per-frame score, threshold and gate decision, so
-an operator can read a session's clean band and set ``threshold`` above it; ``smooth_k`` gates on a
+Live calibration helpers: ``log_scores`` logs the per-frame score, threshold, gate decision and the
+display map's highest pixel (``pmax``), so an operator can read a session's clean band and set
+``threshold`` and ``mask_threshold`` above it; ``smooth_k`` gates on a
 rolling median of the last k frame scores, so a single-frame perturbation does not flick the gate
 on and off on clean frames.
 """
@@ -111,8 +112,9 @@ class FrameScoreGate(Node):
         mask_threshold : per-pixel cutoff of ``decisions`` and, in ``mode="mask"``, of the binary
             ``scores``; defaults to ``threshold``. Set it on the display map's own scale, e.g. to
             the highest pixel of the session's clean frames.
-        log_scores : log each frame's raw score, threshold and gate decision at INFO (read the
-            server log during a session to find the clean band). Off in production.
+        log_scores : log each frame's raw score, threshold, gate decision and the display map's
+            highest pixel (``pmax``) at INFO (read the server log during a session to find the clean
+            band of both thresholds). Off in production.
         smooth_k : gate on a rolling median of the last ``smooth_k`` frame scores (default 1 = no
             smoothing). Runtime-only state (not serialized); assumes one frame per forward.
         """
@@ -174,11 +176,14 @@ class FrameScoreGate(Node):
 
         if self.log_scores:
             name = getattr(self, "name", None) or type(self).__name__
+            # the display map's highest pixel: what mask_threshold cuts
+            peak = scores.detach().reshape(scores.shape[0], -1).amax(dim=1)
             for i in range(frame.shape[0]):
                 extra = f" smoothed={float(gate_score[i]):.4f}" if self.smooth_k > 1 else ""
                 logger.info(
                     f"[{name}] frame_score={float(frame[i]):.4f}{extra} "
-                    f"threshold={self.threshold:.4f} passed={int(passed[i])}"
+                    f"threshold={self.threshold:.4f} passed={int(passed[i])} "
+                    f"pmax={float(peak[i]):.4f}"
                 )
 
         return {

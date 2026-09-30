@@ -16,6 +16,11 @@
   `erode_px` (defaults 1.0 / 4), e.g. an FO anomaly map inside a segmenter's shell mask, so that
   the detector cannot alarm on walnut shells smeared by motion.
 
+### Changed
+- `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the
+  map `mask_threshold` cuts), so a live session's log alone is enough to set both thresholds from
+  clean frames.
+
 ## 0.3.0 - 2026-09-28
 
 ### Added

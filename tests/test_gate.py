@@ -175,6 +175,31 @@ def test_log_scores_logs_every_frame_decision():
     assert "[gate] frame_score=5.0000 threshold=1.0000 passed=1" in lines[1]
 
 
+def test_log_scores_logs_the_display_maps_highest_pixel():
+    """pmax = the displayed map's peak (what mask_threshold cuts), not the alarm map's."""
+    from loguru import logger
+
+    shown = torch.full((2, 4, 4, 1), 0.1, dtype=torch.float32)
+    shown[0, 1, 2, 0] = 9.0  # one hot pixel: top-4 mean 2.325, peak 9.0
+    alarm = torch.full((2, 4, 4, 1), 0.2, dtype=torch.float32)
+    alarm[1, 3, 3, 0] = 7.0
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        kw = {"threshold": 1.0, "topk_frac": 0.25, "log_scores": True}
+        FrameScoreGate(**kw, name="g")(scores=shown)
+        FrameScoreGate(**kw, name="g2")(scores=shown, alarm_scores=alarm)
+    finally:
+        logger.remove(sink)
+    msgs = [m.rstrip() for m in lines]
+    assert msgs == [
+        "[g] frame_score=2.3250 threshold=1.0000 passed=1 pmax=9.0000",
+        "[g] frame_score=0.1000 threshold=1.0000 passed=0 pmax=0.1000",
+        "[g2] frame_score=0.2000 threshold=1.0000 passed=0 pmax=9.0000",  # alarms on alarm_scores
+        "[g2] frame_score=1.9000 threshold=1.0000 passed=1 pmax=0.1000",
+    ]
+
+
 @pytest.mark.parametrize("kw", [{"smooth_k": 0}, {"smooth_k": 2.5}, {"mask_threshold": "x"}])
 def test_invalid_smoothing_and_mask_hparams_raise(kw):
     with pytest.raises(ValueError):

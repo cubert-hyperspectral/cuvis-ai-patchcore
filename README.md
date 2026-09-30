@@ -153,8 +153,8 @@ fusion map.
 
 hparams: `threshold` (required; set above the session's clean band) · `topk_frac` 0.001 · `mode`
 `heatmap` | `mask` · `mask_threshold` (default `threshold`; the cutoff of `decisions`, and of
-`scores` in `mask` mode) · `log_scores` false (log every frame decision at INFO, for calibrating on a
-live session) · `smooth_k` 1 (> 1: gate on the rolling median of the last k frame scores; runtime
+`scores` in `mask` mode) · `log_scores` false (log every frame decision and the display map's
+highest pixel `pmax` at INFO, for calibrating both thresholds on a live session) · `smooth_k` 1 (> 1: gate on the rolling median of the last k frame scores; runtime
 state, one frame per forward). Stateless otherwise: the thresholds are hyper-parameters, not fitted
 buffers, because the operating point drifts with the session.
 
