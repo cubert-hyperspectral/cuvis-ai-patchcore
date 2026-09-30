@@ -12,16 +12,18 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships six nodes:
+The plugin ships eight nodes:
 
 | Node | Role |
 |---|---|
 | [`PatchCoreDetector`](#patchcoredetector) | memory-bank detector on spectra or any dense feature grid (Phase-1 fitted) |
 | [`ScoreRangeNormalizer`](#scorerangenormalizer) | puts one detector's map on its normal range before fusion (Phase-1 fitted) |
-| [`ScoreMapFusion`](#scoremapfusion) | fuses N maps: mean, min, max, weighted mean, or a priority rule for gated maps |
+| [`ScoreMapFusion`](#scoremapfusion) | fuses N maps: mean, min, max, weighted mean, soft minimum, or a priority rule for gated maps |
 | [`FrameScoreGate`](#framescoregate) | blanks a map on frames whose top-k score stays at or below a threshold; emits the object mask |
 | [`DecisionFusion`](#decisionfusion) | fuses N boolean masks: any, all, or the priority rule of `ScoreMapFusion` |
 | [`MaskComposite`](#maskcomposite) | merges N boolean masks into one label map and one level map for display |
+| [`GridSubsample`](#gridsubsample-and-scoreupsample) | every `stride`-th pixel of a cube, to score a per-pixel model on a coarse grid |
+| [`ScoreUpsample`](#gridsubsample-and-scoreupsample) | resizes a grid's score map to the height and width of a reference tensor |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -98,7 +100,10 @@ percentile range (saturates every anomaly on a drifted session).
 | `normalized` | out | `[B, H, W, C]` float32, `>= 0`, unbounded above |
 
 hparams: `n_channels` 1 · `low` 1.0 · `high` 99.0 · `floor` true · `fit_subsample` 4 (spatial stride
-of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 0 · `eps` 1e-9.
+of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 0 · `eps` 1e-9 ·
+`invert` false. With `invert: true` the node calibrates `-x` (fit and inference), for maps where
+higher means more normal, e.g. a Gaussian mixture's log-likelihood; the output is then an anomaly
+score on the same normal-range scale as the other detectors.
 
 ## ScoreMapFusion
 
@@ -110,11 +115,17 @@ of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 
 | `scores` | out | `[B, H, W, 1]` float32 | fused map |
 
 `mode`: `mean` (default) · `min` (AND) · `max` (OR) · `wmean` with `weights` (one per map,
-normalised to sum to one) · `first`: per frame, the first inbound map (in connection order) that is
-not all zero. `first` is for gated maps: connect the preferred detector's gated map first, and a
-second detector's map shows only on frames the first gate blanks. Feed the other modes maps on a
-common scale — a fitted normalizer per detector — otherwise the detector with the widest range
-dominates. Stateless and differentiable.
+normalised to sum to one) · `softmin` with `beta` (required) and optional `weights`: the soft minimum
+`-(1/beta) log(sum_i w_i exp(-beta x_i))`, a soft AND between the minimum (large `beta`; at most
+`log(N) / beta` above it with equal weights) and the mean (small `beta`) · `first`: per frame, the
+first inbound map (in connection order) that is not all zero. `first` is for gated maps: connect the
+preferred detector's gated map first, and a second detector's map shows only on frames the first
+gate blanks. Feed the other modes maps on a common scale — a fitted normalizer per detector —
+otherwise the detector with the widest range dominates. Stateless and differentiable.
+
+Order-dependent rules (`first`, weighted `wmean` / `softmin`): `save_to_file` writes a fan-in's
+connections in the order their source nodes entered the pipeline graph, and a reloaded pipeline uses
+that order. Add the source nodes in the intended order (or check the saved yaml).
 
 A complete two-bank pipeline (raw-spectra bank + SteerViT-feature bank, each calibrated by
 `ScoreRangeNormalizer`, fused by `ScoreMapFusion`) and its Phase-1 trainrun ship with
@@ -189,6 +200,26 @@ Viewers show a `mask` port as a label mask and a `scores` port as a heatmap. A p
 consumes is not a terminal output any more, so a pipeline that also wants the single masks shown
 adds a copy of them, e.g. `DecisionFusion` over one mask.
 
+## GridSubsample and ScoreUpsample
+
+`cuvis_ai_patchcore.node.spatial.GridSubsample` / `ScoreUpsample` — score a per-pixel model on a
+coarse grid of the cube and bring its map back to full resolution. A per-pixel spectral model costs
+the same for every pixel, so on a 1000 x 1080 cube a stride-4 grid is 16 x cheaper.
+
+| Node | Port | Direction | Shape / dtype |
+|---|---|---|---|
+| `GridSubsample` | `cube` | in | `[B, H, W, C]` float32 |
+| | `cube` | out | `[B, ceil(H / stride), ceil(W / stride), C]` = `cube[:, ::stride, ::stride, :]` |
+| `ScoreUpsample` | `scores` | in | `[B, h, w, C]` float32 (the grid's map) |
+| | `reference` | in | any `[B, H, W, *]` float32 of the target size (e.g. the cube) |
+| | `scores` | out | `[B, H, W, C]` float32, `align_corners=False` |
+
+hparams: `GridSubsample` — `stride` 4 · `ScoreUpsample` — `mode` `bilinear` (or `bicubic`,
+`nearest`). Both are stateless and differentiable. A spectral branch, e.g. the builtin
+`SNVCorrection` and `GaussianMixtureClusterer` on the grid, then `ScoreUpsample`, then
+`ScoreRangeNormalizer(invert=true)` on the log-likelihood, gives a map that `ScoreMapFusion`
+(`softmin`) can fuse with an image model's map.
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
@@ -205,9 +236,13 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
   - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
   - class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
+  - class_name: cuvis_ai_patchcore.node.spatial.GridSubsample
+  - class_name: cuvis_ai_patchcore.node.spatial.ScoreUpsample
 ```
 
-For a frozen, reproducible install, pin a release tag instead:
+For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
+`ScoreMapFusion(softmin)` and `ScoreRangeNormalizer(invert)` are not released yet, see the
+changelog):
 
 ```yaml
 name: patchcore

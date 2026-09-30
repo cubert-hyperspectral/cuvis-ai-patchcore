@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- Added mode `softmin` to `ScoreMapFusion`: a soft minimum `-(1/beta) log(sum_i w_i exp(-beta x_i))`
+  with the sharpness `beta` (required) and optional weights, between the hard minimum (large `beta`)
+  and the mean (small `beta`). On the walnut FO data a soft minimum of the multi-scale SteerViT map
+  and a spectral mixture map keeps the objects both see and drops each one's private false alarms.
+- Added `invert` to `ScoreRangeNormalizer`: calibrates the negated map, for maps where higher means
+  more normal (a log-likelihood). The default (`False`) is unchanged.
+- Added `GridSubsample` (every `stride`-th pixel of a cube in both axes) and `ScoreUpsample` (a score
+  map resized to the height and width of a reference tensor, bilinear by default), to score a
+  per-pixel model on a coarse grid and bring its map back to full resolution.
+
 ## 0.3.0 - 2026-09-28
 
 ### Added

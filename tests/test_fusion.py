@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 import torch
 from cuvis_ai_core.node.node import Node
@@ -337,3 +338,75 @@ def test_composite_hparams_round_trip_json():
     node = MaskComposite(labels=[1, 2], levels=[0.4, 1.0], name="comp")
     assert node.hparams["labels"] == [1, 2] and node.hparams["levels"] == [0.4, 1.0]
     json.dumps(node.hparams)
+
+
+# ----- 7. ScoreMapFusion softmin ------------------------------------------------------------
+
+
+def _numpy_softmin(maps: list[torch.Tensor], beta: float, weights=None) -> np.ndarray:
+    x = np.stack([m.numpy().astype(np.float64) for m in maps])
+    w = np.ones(len(maps)) if weights is None else np.asarray(weights, np.float64)
+    w = (w / w.sum()).reshape(-1, 1, 1, 1, 1)
+    return -np.log((w * np.exp(-beta * x)).sum(0)) / beta
+
+
+@pytest.mark.parametrize("weights", [None, [2.0, 1.0, 1.0]])
+def test_softmin_matches_the_closed_form(weights):
+    maps = _maps(3, seed=4)
+    out = ScoreMapFusion(mode="softmin", beta=10.0, weights=weights)(scores=maps)["scores"]
+    assert np.allclose(out.numpy(), _numpy_softmin(maps, 10.0, weights), atol=1e-5)
+
+
+def test_softmin_lies_between_the_minimum_and_the_mean():
+    maps = _maps(3, seed=5)
+    stack = torch.stack(maps)
+    hard = ScoreMapFusion(mode="softmin", beta=1e4)(scores=maps)["scores"]
+    assert torch.all(hard >= stack.amin(0) - 1e-6)
+    assert torch.all(hard <= stack.amin(0) + np.log(3) / 1e4 + 1e-5)  # min + log(N) / beta
+    # the small-beta limit in float64: in float32 the rounding error grows like eps / beta
+    maps64 = [m.double() for m in maps]
+    soft = ScoreMapFusion(mode="softmin", beta=1e-6)(scores=maps64)["scores"]
+    assert torch.allclose(soft, torch.stack(maps64).mean(0), atol=1e-6)
+
+
+def test_softmin_is_stable_for_large_scores():
+    a, b = torch.full((1, 2, 2, 1), 1e4), torch.full((1, 2, 2, 1), 2e4)
+    out = ScoreMapFusion(mode="softmin", beta=50.0)(scores=[a, b])["scores"]
+    assert torch.isfinite(out).all() and torch.allclose(out, a + np.log(2) / 50.0, atol=1e-2)
+
+
+def test_softmin_is_differentiable():
+    maps = [m.requires_grad_() for m in _maps(2, seed=6)]
+    ScoreMapFusion(mode="softmin", beta=3.0)(scores=maps)["scores"].sum().backward()
+    assert all(m.grad is not None and torch.isfinite(m.grad).all() for m in maps)
+
+
+def test_softmin_weight_count_mismatch_raises():
+    node = ScoreMapFusion(mode="softmin", beta=2.0, weights=[1.0, 1.0, 1.0])
+    with pytest.raises(ValueError):
+        node(scores=_maps(2))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"mode": "softmin"},  # missing beta
+        {"mode": "softmin", "beta": 0.0},
+        {"mode": "softmin", "beta": -1.0},
+        {"mode": "softmin", "beta": float("inf")},
+        {"mode": "softmin", "beta": 1.0, "weights": [1.0, -1.0]},
+        {"mode": "mean", "beta": 1.0},  # beta only for softmin
+        {"mode": "min", "beta": 1.0},
+    ],
+)
+def test_softmin_invalid_hparams_raise(bad):
+    with pytest.raises(ValueError):
+        ScoreMapFusion(**bad)
+
+
+def test_softmin_hparams_round_trip_and_beta_defaults_to_none():
+    hp = ScoreMapFusion(mode="softmin", beta=10, weights=[1, 2], name="fuse").hparams
+    assert hp["mode"] == "softmin" and hp["beta"] == 10.0 and hp["weights"] == [1.0, 2.0]
+    json.dumps(hp)
+    for mode in ("mean", "min", "max", "first"):
+        assert ScoreMapFusion(mode=mode).hparams["beta"] is None

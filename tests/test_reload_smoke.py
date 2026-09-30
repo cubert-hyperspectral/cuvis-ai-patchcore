@@ -20,6 +20,7 @@ from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
+from cuvis_ai_patchcore.node.spatial import GridSubsample, ScoreUpsample
 
 pytestmark = pytest.mark.integration
 
@@ -319,3 +320,78 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     assert nodes["comp"].hparams["levels"] == [0.25, 0.5, 1.0]
     for key in (("comp", "mask"), ("comp", "scores")):
         assert torch.equal(after[key], before[key]), key
+
+
+class _GridLogLik(Node):
+    """Module-scope test node: a toy per-pixel log-likelihood of a cube (higher = more normal)."""
+
+    _category = NodeCategory.MODEL
+    _tags = frozenset({NodeTag.TORCH})
+    INPUT_SPECS = {"cube": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, -1))}
+    OUTPUT_SPECS = {"scores": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, 1))}
+
+    def forward(self, cube: torch.Tensor, **_) -> dict[str, torch.Tensor]:
+        return {"scores": -(cube - 2.0).square().mean(dim=-1, keepdim=True)}
+
+
+def test_spectral_softmin_fusion_pipeline_reloads(tmp_path):
+    """GridSubsample -> a per-pixel log-likelihood -> ScoreUpsample -> ScoreRangeNormalizer(invert),
+    fused with a calibrated PatchCore map by ScoreMapFusion(softmin): the new hparams (stride, mode,
+    invert, beta, weights) and the reference wiring survive save -> load."""
+    src = _ConstantCubeSource(seed=7, name="src")
+    grid = GridSubsample(stride=2, name="grid")
+    ll = _GridLogLik(name="ll")
+    up = ScoreUpsample(name="up")
+    ncal = ScoreRangeNormalizer(fit_subsample=1, invert=True, name="ncal")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    pcal = ScoreRangeNormalizer(fit_subsample=1, name="pcal")
+    fuse = ScoreMapFusion(mode="softmin", beta=5.0, weights=[1.0, 2.0], name="fuse")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(2)) * 2 + 1
+    ll_map = up(scores=ll(cube=grid(cube=ref)["cube"])["scores"], reference=ref)["scores"]
+    ncal.statistical_initialization(iter([{"scores": ll_map}]))
+    pcal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    pipe = CuvisPipeline("spectral_softmin_fusion_smoke")
+    pipe.connect(src.outputs.cube, grid.inputs.cube)
+    pipe.connect(grid.outputs.cube, ll.inputs.cube)
+    pipe.connect(ll.outputs.scores, up.inputs.scores)
+    pipe.connect(src.outputs.cube, up.inputs.reference)
+    pipe.connect(up.outputs.scores, ncal.inputs.scores)
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, pcal.inputs.scores)
+    # save_to_file writes a fan-in in the order its source nodes entered the graph (ncal before
+    # pcal here), which is the order after a reload; connect in that order so a weighted rule means
+    # the same map order before and after
+    pipe.connect(ncal.outputs.normalized, fuse.inputs.scores)
+    pipe.connect(pcal.outputs.normalized, fuse.inputs.scores)
+
+    ctx = Context(stage=ExecutionStage.INFERENCE)
+    before = pipe.forward(batch={}, context=ctx)
+    assert before[("up", "scores")].shape == (1, H, W, 1)
+    manual = ScoreMapFusion(mode="softmin", beta=5.0, weights=[1.0, 2.0])(
+        scores=[before[("ncal", "normalized")], before[("pcal", "normalized")]]
+    )["scores"]
+    assert torch.allclose(before[("fuse", "scores")], manual, atol=1e-6)
+
+    yaml_path = tmp_path / "softmin.yaml"
+    pipe.save_to_file(str(yaml_path))
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert nodes["grid"].hparams["stride"] == 2 and nodes["up"].hparams["mode"] == "bilinear"
+    assert nodes["ncal"].hparams["invert"] is True and nodes["pcal"].hparams["invert"] is False
+    assert nodes["fuse"].hparams["beta"] == 5.0 and nodes["fuse"].hparams["weights"] == [1.0, 2.0]
+    after = restored.forward(batch={}, context=ctx)
+    for key in (("ncal", "normalized"), ("pcal", "normalized"), ("fuse", "scores")):
+        assert torch.allclose(after[key], before[key], atol=1e-6), key
