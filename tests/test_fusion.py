@@ -1,4 +1,5 @@
-"""ScoreMapFusion and DecisionFusion: golden rules, port contract, fan-in, hparam validation."""
+"""ScoreMapFusion, DecisionFusion, MaskComposite, ScoreMapSuppression: golden rules, port contract,
+fan-in, hparam validation."""
 
 from __future__ import annotations
 
@@ -12,7 +13,12 @@ from cuvis_ai_core.pipeline.pipeline import CuvisPipeline
 from cuvis_ai_schemas.enums import ExecutionStage, NodeCategory, NodeTag
 from cuvis_ai_schemas.pipeline import PortSpec
 
-from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import (
+    DecisionFusion,
+    MaskComposite,
+    ScoreMapFusion,
+    ScoreMapSuppression,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -410,3 +416,109 @@ def test_softmin_hparams_round_trip_and_beta_defaults_to_none():
     json.dumps(hp)
     for mode in ("mean", "min", "max", "first"):
         assert ScoreMapFusion(mode=mode).hparams["beta"] is None
+
+
+# ----- 8. ScoreMapSuppression -----------------------------------------------------------------
+
+
+def _block_mask() -> torch.Tensor:
+    """A 3 x 3 block (rows 1-3, cols 2-4) set in both frames of a [B, 5, 7, 1] mask."""
+    m = torch.zeros(B, H, W, 1, dtype=torch.bool)
+    m[:, 1:4, 2:5, 0] = True
+    return m
+
+
+def test_suppression_zeroes_the_mask_without_erosion():
+    s = torch.rand(B, H, W, 1, generator=torch.Generator().manual_seed(3)) + 0.5
+    out = ScoreMapSuppression(weight=1.0, erode_px=0)(scores=s, mask=_block_mask())["scores"]
+    exp = s.clone()
+    exp[:, 1:4, 2:5, 0] = 0.0
+    assert torch.equal(out, exp)
+
+
+def test_suppression_erodes_the_mask_by_erode_px():
+    s = torch.ones(B, H, W, 1)
+    out = ScoreMapSuppression(weight=1.0, erode_px=1)(scores=s, mask=_block_mask())["scores"]
+    exp = torch.ones(B, H, W, 1)
+    exp[:, 2, 3, 0] = 0.0  # only the centre of the 3 x 3 block has no outside pixel within 1 px
+    assert torch.equal(out, exp)
+    # a 2 px margin leaves nothing of a 3 x 3 block
+    out2 = ScoreMapSuppression(weight=1.0, erode_px=2)(scores=s, mask=_block_mask())["scores"]
+    assert torch.equal(out2, s)
+
+
+def test_suppression_scales_by_one_minus_weight():
+    s = torch.full((B, H, W, 1), 2.0)
+    out = ScoreMapSuppression(weight=0.25, erode_px=0)(scores=s, mask=_block_mask())["scores"]
+    assert torch.allclose(out[:, 1:4, 2:5], torch.full_like(out[:, 1:4, 2:5], 1.5))
+    assert torch.equal(out[:, 0], s[:, 0])
+
+
+def test_suppression_weight_zero_is_identity():
+    s = torch.rand(B, H, W, 1, generator=torch.Generator().manual_seed(4))
+    out = ScoreMapSuppression(weight=0.0)(scores=s, mask=_block_mask())["scores"]
+    assert torch.equal(out, s)
+
+
+def test_suppression_image_border_does_not_erode_the_mask():
+    s = torch.ones(B, H, W, 1)
+    full = torch.ones(B, H, W, 1, dtype=torch.bool)
+    out = ScoreMapSuppression(weight=1.0, erode_px=2)(scores=s, mask=full)["scores"]
+    assert torch.equal(out, torch.zeros_like(s))
+
+
+def test_suppression_counts_a_pixel_where_any_mask_channel_is_set():
+    s = torch.ones(B, H, W, 1)
+    m = torch.zeros(B, H, W, 2, dtype=torch.bool)
+    m[:, 0, 0, 1] = True
+    out = ScoreMapSuppression(weight=1.0, erode_px=0)(scores=s, mask=m)["scores"]
+    assert out[:, 0, 0, 0].tolist() == [0.0, 0.0] and float(out.sum()) == B * (H * W - 1)
+
+
+def test_suppression_is_differentiable_in_the_scores():
+    s = torch.rand(B, H, W, 1, generator=torch.Generator().manual_seed(5)).requires_grad_(True)
+    out = ScoreMapSuppression(weight=0.5, erode_px=0)(scores=s, mask=_block_mask())["scores"]
+    out.sum().backward()
+    exp = torch.ones(B, H, W, 1)
+    exp[:, 1:4, 2:5, 0] = 0.5
+    assert torch.equal(s.grad, exp)
+
+
+def test_suppression_port_contract():
+    s = torch.rand(B, H, W, 1)
+    out = ScoreMapSuppression()(scores=s, mask=_block_mask())
+    spec = ScoreMapSuppression.OUTPUT_SPECS["scores"]
+    assert set(out) == {"scores"}
+    assert out["scores"].shape == s.shape and out["scores"].dtype == spec.dtype
+
+
+def test_suppression_shape_mismatch_raises():
+    with pytest.raises(ValueError):
+        ScoreMapSuppression()(
+            scores=torch.rand(B, H, W, 1), mask=torch.zeros(B, H, W + 1, 1, dtype=torch.bool)
+        )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"weight": -0.1},
+        {"weight": 1.5},
+        {"weight": True},
+        {"weight": "1"},
+        {"erode_px": -1},
+        {"erode_px": 1.5},
+        {"erode_px": True},
+    ],
+)
+def test_suppression_invalid_hparams_raise(bad):
+    with pytest.raises(ValueError):
+        ScoreMapSuppression(**bad)
+
+
+def test_suppression_hparams_round_trip_json():
+    hp = ScoreMapSuppression(weight=1, erode_px=3, name="sup").hparams
+    assert hp["weight"] == 1.0 and hp["erode_px"] == 3
+    json.dumps(hp)
+    default = ScoreMapSuppression().hparams
+    assert default["weight"] == 1.0 and default["erode_px"] == 4

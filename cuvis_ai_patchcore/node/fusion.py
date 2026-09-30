@@ -16,6 +16,11 @@ first inbound mask with a set pixel, the mask of the map a ``first`` score fusio
 
 ``MaskComposite`` merges several boolean masks for display: a label map (e.g. 1 = shell, 2 = foreign
 object) and a level map, so that one output shows what separate masks showed one at a time.
+
+``ScoreMapSuppression`` down-weights a score map inside a boolean mask shrunk by a margin, e.g. an
+anomaly map inside a segmenter's mask of an object class that cannot be anomalous (walnut shells):
+the detector's false alarms on those objects go, while objects lying next to them keep their score
+along the margin.
 """
 
 from __future__ import annotations
@@ -301,3 +306,79 @@ class MaskComposite(Node):
         label_map = (stack.to(torch.int32) * labels).amax(dim=0)
         level_map = (stack.to(torch.float32) * levels).amax(dim=0).unsqueeze(-1)
         return {"mask": label_map, "scores": level_map}
+
+
+class ScoreMapSuppression(Node):
+    """Down-weight a score map [B, H, W, 1] inside a boolean mask shrunk by ``erode_px``."""
+
+    _category = NodeCategory.TRANSFORM
+    _tags = frozenset({NodeTag.ANOMALY, NodeTag.MASK, NodeTag.TORCH})
+
+    INPUT_SPECS = {
+        "scores": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, 1),
+            description="Score map [B, H, W, 1], e.g. a fused anomaly map.",
+        ),
+        "mask": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Boolean mask [B, H, W, C] of the same batch, height and width: where the "
+            "score map is suppressed (a pixel counts as set where any channel is), e.g. a "
+            "segmenter's decisions for an object class that cannot be anomalous.",
+        ),
+    }
+    OUTPUT_SPECS = {
+        "scores": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, 1),
+            description="scores x (1 - weight x the eroded mask): unchanged outside the mask and "
+            "within `erode_px` of its edge, scaled by 1 - weight inside.",
+        ),
+    }
+
+    def __init__(self, weight: float = 1.0, erode_px: int = 4, **kwargs: Any) -> None:
+        """Create a masked score suppression.
+
+        Parameters
+        ----------
+        weight : how much of the score is removed inside the eroded mask, in ``[0, 1]`` (default
+            1.0: set to zero; 0.0 leaves the map unchanged).
+        erode_px : margin in pixels by which the mask is shrunk first (square erosion, default 4),
+            so that an object touching a masked one keeps its score near the shared edge. The image
+            border does not shrink the mask.
+        """
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, (int, float))
+            or not 0.0 <= weight <= 1.0
+        ):
+            raise ValueError(
+                f"ScoreMapSuppression: weight must be a number in [0, 1], got {weight!r}."
+            )
+        if isinstance(erode_px, bool) or not isinstance(erode_px, int) or erode_px < 0:
+            raise ValueError(
+                f"ScoreMapSuppression: erode_px must be an integer >= 0, got {erode_px!r}."
+            )
+        self.weight = float(weight)
+        self.erode_px = int(erode_px)
+        super().__init__(weight=self.weight, erode_px=self.erode_px, **kwargs)
+
+    def forward(self, scores: Tensor, mask: Tensor, **_: Any) -> dict[str, Tensor]:
+        """Return the score map with the eroded mask's pixels scaled by ``1 - weight``."""
+        inside = mask.any(dim=-1)  # [B, H, W]
+        if inside.shape != scores.shape[:3]:
+            raise ValueError(
+                f"ScoreMapSuppression: mask is [B, H, W] = {tuple(inside.shape)}, scores "
+                f"{tuple(scores.shape[:3])}."
+            )
+        if self.erode_px:
+            # a pixel stays inside if no outside pixel lies within erode_px (square window);
+            # max-pool pads with zeros, so beyond the image border counts as inside
+            outside = (~inside).to(scores.dtype).unsqueeze(1)
+            near_outside = torch.nn.functional.max_pool2d(
+                outside, kernel_size=2 * self.erode_px + 1, stride=1, padding=self.erode_px
+            )
+            inside = near_outside.squeeze(1) == 0
+        keep = 1.0 - self.weight * inside.to(scores.dtype)
+        return {"scores": scores * keep.unsqueeze(-1)}

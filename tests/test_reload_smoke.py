@@ -17,7 +17,12 @@ from cuvis_ai_schemas.execution import Context
 from cuvis_ai_schemas.pipeline import PortSpec
 
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
-from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import (
+    DecisionFusion,
+    MaskComposite,
+    ScoreMapFusion,
+    ScoreMapSuppression,
+)
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 from cuvis_ai_patchcore.node.spatial import GridSubsample, ScoreUpsample
@@ -394,4 +399,56 @@ def test_spectral_softmin_fusion_pipeline_reloads(tmp_path):
     assert nodes["fuse"].hparams["beta"] == 5.0 and nodes["fuse"].hparams["weights"] == [1.0, 2.0]
     after = restored.forward(batch={}, context=ctx)
     for key in (("ncal", "normalized"), ("pcal", "normalized"), ("fuse", "scores")):
+        assert torch.allclose(after[key], before[key], atol=1e-6), key
+
+
+def test_suppressed_gate_pipeline_reloads(tmp_path):
+    """PatchCore -> normaliser -> ScoreMapSuppression (mask = a mask-mode gate's decisions, the
+    stand-in for a segmenter's mask) -> FrameScoreGate: the suppression hparams and the two-input
+    wiring survive save -> load, and the gate sees the suppressed map."""
+    src = _ConstantCubeSource(seed=5, name="src")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    cal = ScoreRangeNormalizer(fit_subsample=1, name="cal")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    cal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    shells = FrameScoreGate(threshold=0.0, mode="mask", mask_threshold=0.5, name="shells")
+    sup = ScoreMapSuppression(weight=0.75, erode_px=1, name="sup")
+    gate = FrameScoreGate(threshold=0.0, name="gate")
+    pipe = CuvisPipeline("suppressed_gate_smoke")
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, cal.inputs.scores)
+    pipe.connect(cal.outputs.normalized, shells.inputs.scores)
+    pipe.connect(cal.outputs.normalized, sup.inputs.scores)
+    pipe.connect(shells.outputs.decisions, sup.inputs.mask)
+    pipe.connect(sup.outputs.scores, gate.inputs.scores)
+
+    ctx = Context(stage=ExecutionStage.INFERENCE)
+    before = pipe.forward(batch={}, context=ctx)
+    mask = before[("shells", "decisions")]
+    assert mask.any() and not mask.all()
+    exp = ScoreMapSuppression(weight=0.75, erode_px=1)(
+        scores=before[("cal", "normalized")], mask=mask
+    )["scores"]
+    assert torch.equal(before[("sup", "scores")], exp)
+
+    yaml_path = tmp_path / "suppressed.yaml"
+    pipe.save_to_file(str(yaml_path))
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert nodes["sup"].hparams["weight"] == 0.75 and nodes["sup"].hparams["erode_px"] == 1
+    after = restored.forward(batch={}, context=ctx)
+    for key in (("sup", "scores"), ("gate", "frame_score"), ("gate", "scores")):
         assert torch.allclose(after[key], before[key], atol=1e-6), key

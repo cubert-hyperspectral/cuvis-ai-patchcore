@@ -12,6 +12,9 @@
 - Added `GridSubsample` (every `stride`-th pixel of a cube in both axes) and `ScoreUpsample` (a score
   map resized to the height and width of a reference tensor, bilinear by default), to score a
   per-pixel model on a coarse grid and bring its map back to full resolution.
+- Added `ScoreMapSuppression`: a score map scaled by `1 - weight` inside a boolean mask shrunk by
+  `erode_px` (defaults 1.0 / 4), e.g. an FO anomaly map inside a segmenter's shell mask, so that
+  the detector cannot alarm on walnut shells smeared by motion.
 
 ## 0.3.0 - 2026-09-28
 

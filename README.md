@@ -24,6 +24,7 @@ The plugin ships eight nodes:
 | [`MaskComposite`](#maskcomposite) | merges N boolean masks into one label map and one level map for display |
 | [`GridSubsample`](#gridsubsample-and-scoreupsample) | every `stride`-th pixel of a cube, to score a per-pixel model on a coarse grid |
 | [`ScoreUpsample`](#gridsubsample-and-scoreupsample) | resizes a grid's score map to the height and width of a reference tensor |
+| [`ScoreMapSuppression`](#scoremapsuppression) | down-weights a score map inside a boolean mask shrunk by a margin (e.g. a segmenter's mask of objects that cannot be anomalous) |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -219,6 +220,24 @@ hparams: `GridSubsample` — `stride` 4 · `ScoreUpsample` — `mode` `bilinear`
 `SNVCorrection` and `GaussianMixtureClusterer` on the grid, then `ScoreUpsample`, then
 `ScoreRangeNormalizer(invert=true)` on the log-likelihood, gives a map that `ScoreMapFusion`
 (`softmin`) can fuse with an image model's map.
+
+## ScoreMapSuppression
+
+`cuvis_ai_patchcore.node.fusion.ScoreMapSuppression` — down-weight a score map inside a boolean
+mask, e.g. an anomaly map inside a segmenter's mask of an object class that cannot be anomalous
+(walnut shells), placed before the gate so that neither the frame score nor the object mask can
+come from those objects.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `scores` | in | `[B, H, W, 1]` float32 | e.g. a fused anomaly map |
+| `mask` | in | `[B, H, W, C]` bool | same B, H, W; a pixel counts where any channel is set |
+| `scores` | out | `[B, H, W, 1]` float32 | `scores x (1 - weight x the eroded mask)` |
+
+hparams: `weight` (default 1.0, in `[0, 1]`: the share of the score removed inside the mask) ·
+`erode_px` (default 4, >= 0): the mask is first shrunk by a square erosion of this many pixels, so
+an object touching a masked one keeps its score along the shared edge; the image border does not
+shrink the mask. Stateless, differentiable in `scores`.
 
 ## Install
 
