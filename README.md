@@ -12,7 +12,7 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships twelve nodes:
+The plugin ships fourteen nodes:
 
 | Node | Role |
 |---|---|
@@ -28,6 +28,8 @@ The plugin ships twelve nodes:
 | [`MaskPersistence`](#maskpersistence) | keeps a mask pixel only where the previous frame's mask lies within a radius, so one-frame flickers never show |
 | [`MaskMinArea`](#maskminarea) | drops the blobs of a mask below a pixel count, e.g. specks on an empty background |
 | [`ScoreMapSmoothing`](#scoremapsmoothing) | Gaussian smoothing of a score map (PatchCore's post-processing) |
+| [`SpectralObjectMask`](#spectralobjectmask-and-maskblobgate) | marks the pixels that are not the background material (spectral angle to the frame's median) |
+| [`MaskBlobGate`](#spectralobjectmask-and-maskblobgate) | keeps the blobs of a mask that hold enough pixels of a second mask (e.g. objects) |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -292,6 +294,21 @@ map (calibrate the gate on the smoothed map).
 hparams: `sigma_px` (default 8.0, >= 0; `0` passes the map through). Stateless (the kernel is
 not saved), torch-native, differentiable.
 
+## SpectralObjectMask and MaskBlobGate
+
+`cuvis_ai_patchcore.node.objectness.SpectralObjectMask` marks a pixel as an object where its
+spectral angle to the frame's median spectrum (the background's, when it covers most of the
+frame) exceeds `min_angle_deg` (default 6.0), computed on every `stride`-th pixel (default 4) and
+expanded by nearest neighbour. Brightness-invariant (shadows stay background) and relative to
+the same frame (a white-reference error shifts background and objects alike); class-agnostic
+(any material that differs from the background is an object, known or not). Outputs
+`decisions` `[B, H, W, 1]` bool and `angle` `[B, H/s, W/s, 1]` float32.
+
+`cuvis_ai_patchcore.node.morphology.MaskBlobGate` keeps the 8-connected blobs of `decisions`
+that hold at least `min_px` (default 16) pixels of `mask` (any channel). With the object mask as
+`mask`, an anomaly blob on the empty background goes, one around an object (halo included)
+stays. A foreign object with the background's own spectrum is not an object to it.
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
@@ -314,10 +331,13 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
   - class_name: cuvis_ai_patchcore.node.morphology.MaskMinArea
   - class_name: cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing
+  - class_name: cuvis_ai_patchcore.node.objectness.SpectralObjectMask
+  - class_name: cuvis_ai_patchcore.node.morphology.MaskBlobGate
 ```
 
 For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
-`ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapSmoothing`,
+`ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapSmoothing`, `SpectralObjectMask`,
+`MaskBlobGate`,
 `ScoreMapFusion(softmin)` and
 `ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 

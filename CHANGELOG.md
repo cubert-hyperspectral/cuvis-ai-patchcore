@@ -29,6 +29,12 @@
   separable, mirrored border), PatchCore's own post-processing, before the gate. With the 1-Oct
   refit banks on the user's labels (sigma 8 + MaskMinArea 250): fake shells shown 106 -> 154 of
   182, stems 60 -> 69 of 73, false blobs per FO frame 0.170 -> 0.090.
+- Added `SpectralObjectMask` (the pixels whose spectral angle to the frame's median spectrum
+  exceeds `min_angle_deg`, default 6, on a stride-4 grid) and `MaskBlobGate` (the blobs of a
+  mask that hold at least `min_px` pixels of a second mask): together a class-agnostic object
+  gate for an anomaly mask. On the user-labelled walnut frames no FO object is lost and the false
+  blobs per FO frame drop 0.475 -> 0.305 (deployed banks; 0.170 with MaskMinArea 250); on a
+  recording with a wrong white reference the marks on the empty belt drop from 10.6 per frame to 0.
 
 ### Changed
 - `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the

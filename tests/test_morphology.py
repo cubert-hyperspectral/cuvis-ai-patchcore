@@ -10,7 +10,7 @@ import pytest
 import torch
 from scipy import ndimage
 
-from cuvis_ai_patchcore.node.morphology import MaskMinArea
+from cuvis_ai_patchcore.node.morphology import MaskBlobGate, MaskMinArea
 
 pytestmark = pytest.mark.unit
 
@@ -109,3 +109,60 @@ def test_hparams_round_trip_json():
     assert hp["min_area"] == 100
     json.dumps(hp)
     assert MaskMinArea().hparams["min_area"] == 250
+
+
+# ----- MaskBlobGate -------------------------------------------------------------------------
+
+
+def _gate_reference(m: np.ndarray, g: np.ndarray, k: int) -> np.ndarray:
+    lab, nb = ndimage.label(m, structure=np.ones((3, 3)))
+    if not nb:
+        return np.zeros_like(m)
+    hits = ndimage.sum(g, lab, index=np.arange(1, nb + 1))
+    keep = np.zeros(nb + 1, bool)
+    keep[1:] = hits >= k
+    return keep[lab]
+
+
+def test_blob_gate_keeps_the_blobs_on_the_gate_only():
+    m = torch.zeros(1, H, W, 1, dtype=torch.bool)
+    m[0, 1:5, 1:5, 0] = True  # on empty background
+    m[0, 10:16, 10:16, 0] = True  # around an object
+    g = torch.zeros(1, H, W, 1, dtype=torch.bool)
+    g[0, 12:14, 12:14, 0] = True  # 4 object pixels inside the second blob
+    out = MaskBlobGate(min_px=4)(decisions=m, mask=g)["decisions"]
+    exp = torch.zeros_like(m)
+    exp[0, 10:16, 10:16, 0] = True
+    assert torch.equal(out, exp)
+    assert not MaskBlobGate(min_px=5)(decisions=m, mask=g)["decisions"].any()
+
+
+@pytest.mark.parametrize("k", [1, 3, 10])
+def test_blob_gate_matches_scipy(k):
+    gen = torch.Generator().manual_seed(k)
+    m = torch.rand(2, H, W, 1, generator=gen) < 0.35
+    g = torch.rand(2, H, W, 2, generator=gen) < 0.2  # two gate channels: any counts
+    out = MaskBlobGate(min_px=k)(decisions=m, mask=g)["decisions"].numpy()
+    for b in range(2):
+        exp = _gate_reference(m[b, :, :, 0].numpy(), g[b].any(-1).numpy(), k)
+        assert np.array_equal(out[b, :, :, 0], exp), b
+
+
+def test_blob_gate_zero_is_the_identity_and_shapes_are_checked():
+    m = torch.rand(1, H, W, 1, generator=torch.Generator().manual_seed(1)) < 0.4
+    g = torch.zeros(1, H, W, 1, dtype=torch.bool)
+    assert torch.equal(MaskBlobGate(min_px=0)(decisions=m, mask=g)["decisions"], m)
+    with pytest.raises(ValueError):
+        MaskBlobGate()(decisions=m, mask=torch.zeros(1, H, W + 1, 1, dtype=torch.bool))
+
+
+def test_blob_gate_port_contract_and_hparams():
+    m = torch.rand(2, H, W, 1, generator=torch.Generator().manual_seed(2)) < 0.4
+    out = MaskBlobGate()(decisions=m, mask=m)
+    assert set(out) == {"decisions"} and out["decisions"].shape == m.shape
+    assert out["decisions"].dtype == torch.bool
+    with pytest.raises(ValueError):
+        MaskBlobGate(min_px=-1)
+    hp = MaskBlobGate(min_px=8, name="objgate").hparams
+    assert hp["min_px"] == 8
+    json.dumps(hp)

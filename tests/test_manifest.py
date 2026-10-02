@@ -14,7 +14,8 @@ from cuvis_ai_core.utils.node_registry import NodeRegistry
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
-from cuvis_ai_patchcore.node.morphology import MaskMinArea
+from cuvis_ai_patchcore.node.morphology import MaskBlobGate, MaskMinArea
+from cuvis_ai_patchcore.node.objectness import SpectralObjectMask
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 from cuvis_ai_patchcore.node.spatial import ScoreMapSmoothing
 from cuvis_ai_patchcore.node.temporal import MaskPersistence
@@ -38,6 +39,8 @@ def test_manifest_registers_plugin_and_resolves_nodes():
     assert registry.get("MaskPersistence") is MaskPersistence
     assert registry.get("MaskMinArea") is MaskMinArea
     assert registry.get("ScoreMapSmoothing") is ScoreMapSmoothing
+    assert registry.get("MaskBlobGate") is MaskBlobGate
+    assert registry.get("SpectralObjectMask") is SpectralObjectMask
 
 
 def test_manifest_capabilities_are_importable_nodes():
