@@ -12,7 +12,7 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships ten nodes:
+The plugin ships eleven nodes:
 
 | Node | Role |
 |---|---|
@@ -26,6 +26,7 @@ The plugin ships ten nodes:
 | [`ScoreUpsample`](#gridsubsample-and-scoreupsample) | resizes a grid's score map to the height and width of a reference tensor |
 | [`ScoreMapSuppression`](#scoremapsuppression) | down-weights a score map inside a boolean mask shrunk by a margin (e.g. a segmenter's mask of objects that cannot be anomalous) |
 | [`MaskPersistence`](#maskpersistence) | keeps a mask pixel only where the previous frame's mask lies within a radius, so one-frame flickers never show |
+| [`MaskMinArea`](#maskminarea) | drops the blobs of a mask below a pixel count, e.g. specks on an empty background |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -259,6 +260,21 @@ largest distance an object moves between two frames. Runtime state only (the las
 mask, not serialized): the first frame after loading, after `reset()` or after a change of mask
 shape or device shows nothing. Not differentiable (boolean masks).
 
+## MaskMinArea
+
+`cuvis_ai_patchcore.node.morphology.MaskMinArea` — drop the 8-connected blobs of a boolean mask
+that have fewer than `min_area` pixels. A real object's blob is the object plus the score map's
+halo; specks from texture or noise on an empty background are a few dozen pixels. Placed after a
+`FrameScoreGate`'s `decisions`, before the viewers of the mask (the alarm is unchanged).
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | each frame and channel on its own |
+| `decisions` | out | `[B, H, W, C]` bool | the blobs with at least `min_area` pixels |
+
+hparams: `min_area` (default 250, >= 0; `0` / `1` keep everything). Stateless; connected
+components by OpenCV on the CPU, not differentiable (boolean masks).
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
@@ -279,10 +295,11 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.spatial.ScoreUpsample
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapSuppression
   - class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
+  - class_name: cuvis_ai_patchcore.node.morphology.MaskMinArea
 ```
 
 For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
-`ScoreMapSuppression`, `MaskPersistence`, `ScoreMapFusion(softmin)` and
+`ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapFusion(softmin)` and
 `ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 
 ```yaml

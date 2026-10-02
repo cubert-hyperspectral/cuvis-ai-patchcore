@@ -21,6 +21,10 @@
   (labelled 1-Oct frames: false blobs per FO frame 0.47 -> 0.25 with the deployed banks, 0.17 ->
   0.07 with the refit; each FO material shows on 1-4 fewer frames, mostly an object's first frame,
   stems on 4-7 fewer). Runtime state only, nothing serialized.
+- Added `MaskMinArea`: drops the 8-connected blobs of a boolean mask below `min_area` pixels
+  (default 250). On the user-labelled walnut frames it halves the false FO blobs per FO frame
+  (0.475 -> 0.215 for the deployed banks, 0.170 -> 0.060 for the refit) and loses no FO object
+  (one stem frame of 73 for the refit); specks on the empty belt are 42 px (median), FO blobs 9050 px.
 
 ### Changed
 - `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the
