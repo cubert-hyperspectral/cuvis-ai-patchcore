@@ -1,5 +1,6 @@
-"""SpectralObjectMask: golden rule against the numpy angle map of the walnut study, brightness
-invariance, the belt vs a different spectrum, port contract, hparams."""
+"""SpectralObjectMask: golden rule against a numpy angle map (the median of the median-stride grid,
+the angle on the stride grid), brightness invariance, the belt vs a different spectrum, port
+contract, hparams."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from cuvis_ai_patchcore.node.objectness import SpectralObjectMask
 
 pytestmark = pytest.mark.unit
 
-H, W, C = 40, 48, 12
+H, W, C = 40, 40, 12  # odd sample counts on every grid used here: torch's median = numpy's
 
 
 def _belt_cube(seed: int = 0, b: int = 1) -> torch.Tensor:
@@ -26,11 +27,13 @@ def _belt_cube(seed: int = 0, b: int = 1) -> torch.Tensor:
     return cube.to(torch.float32)
 
 
-def _reference(cube: np.ndarray, stride: int, deg: float) -> tuple[np.ndarray, np.ndarray]:
-    """The study's make_angle4 + object_mask: angle on cube[::s, ::s], nearest to H x W."""
+def _reference(
+    cube: np.ndarray, stride: int, deg: float, median_stride: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The per-band median of cube[::m, ::m]; the angle of cube[::s, ::s] to it, to H x W."""
     c4 = cube[::stride, ::stride].astype(np.float32)
     x = c4.reshape(-1, c4.shape[-1])
-    ref = np.median(x, axis=0)
+    ref = np.median(cube[::median_stride, ::median_stride].reshape(-1, cube.shape[-1]), axis=0)
     cos = (x @ ref) / (np.linalg.norm(x, axis=1) * np.linalg.norm(ref) + 1e-6)
     ang = np.degrees(np.arccos(np.clip(cos, -1, 1))).reshape(c4.shape[:2])
     full = (
@@ -45,10 +48,12 @@ def _reference(cube: np.ndarray, stride: int, deg: float) -> tuple[np.ndarray, n
 
 
 @pytest.mark.parametrize("stride", [1, 2, 4])
-def test_matches_the_numpy_angle_map(stride):
+@pytest.mark.parametrize("median_stride", [1, 8])
+def test_matches_the_numpy_angle_map(stride, median_stride):
     cube = _belt_cube(seed=stride)
-    out = SpectralObjectMask(min_angle_deg=6.0, stride=stride)(cube=cube)
-    ang, full = _reference(cube[0].numpy(), stride, 6.0)
+    node = SpectralObjectMask(min_angle_deg=6.0, stride=stride, median_stride=median_stride)
+    out = node(cube=cube)
+    ang, full = _reference(cube[0].numpy(), stride, 6.0, median_stride)
     # float32 arccos is ill-conditioned near 0 deg (the belt): a few thousandths of a degree
     assert np.allclose(out["angle"][0, ..., 0].numpy(), ang, atol=1e-2)
     assert np.array_equal(out["decisions"][0, ..., 0].numpy(), full)
@@ -97,6 +102,8 @@ def test_port_contract():
         {"stride": 0},
         {"stride": 1.5},
         {"stride": True},
+        {"median_stride": 0},
+        {"median_stride": 2.0},
     ],
 )
 def test_invalid_hparams_raise(bad):
@@ -105,8 +112,8 @@ def test_invalid_hparams_raise(bad):
 
 
 def test_hparams_round_trip_json():
-    hp = SpectralObjectMask(min_angle_deg=5, stride=2, name="objects").hparams
-    assert hp["min_angle_deg"] == 5.0 and hp["stride"] == 2
+    hp = SpectralObjectMask(min_angle_deg=5, stride=2, median_stride=4, name="objects").hparams
+    assert hp["min_angle_deg"] == 5.0 and hp["stride"] == 2 and hp["median_stride"] == 4
     json.dumps(hp)
     d = SpectralObjectMask().hparams
-    assert d["min_angle_deg"] == 6.0 and d["stride"] == 4
+    assert d["min_angle_deg"] == 6.0 and d["stride"] == 4 and d["median_stride"] == 8

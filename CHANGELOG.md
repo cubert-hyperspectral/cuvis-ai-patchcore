@@ -35,8 +35,21 @@
   gate for an anomaly mask. On the user-labelled walnut frames no FO object is lost and the false
   blobs per FO frame drop 0.475 -> 0.305 (deployed banks; 0.170 with MaskMinArea 250); on a
   recording with a wrong white reference the marks on the empty belt drop from 10.6 per frame to 0.
+- Added `MaskBlobFilter`: `MaskMinArea`, `SpectralObjectMask` and `MaskBlobGate` in one pass (one
+  labelling, both tests per blob, nothing done on an empty mask, the spectral angle on the cell
+  grid without a GPU sync), identical to the chain. Behind the walnut FO gate with
+  `MaskPersistence`: +1.5 to +2.7 ms per FO frame on an RTX 4070 laptop GPU, ~0 on clean frames;
+  the four walnut_final_robust pipelines match an independent reimplementation on 32 real frames.
 
 ### Changed
+- `MaskMinArea` and `MaskBlobGate` label the blobs on a grid of `cell` x `cell` pixel cells
+  (new hparam `cell`, default 4; `cell=1` labels every pixel): exact pixel counts, marks whose
+  cells touch form one blob. 28 ms -> ~1 ms per walnut frame for the whole robust mask.
+- `SpectralObjectMask` takes the median over every `median_stride`-th pixel (new hparam, default 8)
+  along the contiguous axis (4x faster on a GPU).
+- `MaskPersistence` returns at once when this frame or the one before is empty, keeps the
+  previous frame's emptiness (one GPU sync per frame instead of two) and sums the integral image
+  in int32 (2x faster than the int64 default).
 - `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the
   map `mask_threshold` cuts), so a live session's log alone is enough to set both thresholds from
   clean frames.

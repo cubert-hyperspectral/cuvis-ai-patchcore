@@ -30,6 +30,7 @@ The plugin ships fourteen nodes:
 | [`ScoreMapSmoothing`](#scoremapsmoothing) | Gaussian smoothing of a score map (PatchCore's post-processing) |
 | [`SpectralObjectMask`](#spectralobjectmask-and-maskblobgate) | marks the pixels that are not the background material (spectral angle to the frame's median) |
 | [`MaskBlobGate`](#spectralobjectmask-and-maskblobgate) | keeps the blobs of a mask that hold enough pixels of a second mask (e.g. objects) |
+| [`MaskBlobFilter`](#maskblobfilter) | MaskMinArea + SpectralObjectMask + MaskBlobGate in one lazy pass, for a live pipeline |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -265,18 +266,23 @@ shape or device shows nothing. Not differentiable (boolean masks).
 
 ## MaskMinArea
 
-`cuvis_ai_patchcore.node.morphology.MaskMinArea` — drop the 8-connected blobs of a boolean mask
-that have fewer than `min_area` pixels. A real object's blob is the object plus the score map's
-halo; specks from texture or noise on an empty background are a few dozen pixels. Placed after a
+`cuvis_ai_patchcore.node.morphology.MaskMinArea` — drop the blobs of a boolean mask that have
+fewer than `min_area` pixels. A real object's blob is the object plus the score map's halo; specks
+from texture or noise on an empty background are a few dozen pixels. Placed after a
 `FrameScoreGate`'s `decisions`, before the viewers of the mask (the alarm is unchanged).
+
+The blobs are labelled on a grid of `cell` x `cell` pixel cells (default 4): the marked pixels per
+cell are summed on the GPU and only the small cell grid is labelled (8-connected, OpenCV on the
+CPU). Areas are exact pixel counts; the one difference to labelling every pixel is that marks
+whose cells touch form one blob (gaps of up to `2 * cell - 1` pixels). `cell=1` labels every pixel.
 
 | Port | Direction | Shape / dtype | Notes |
 |---|---|---|---|
 | `decisions` | in | `[B, H, W, C]` bool | each frame and channel on its own |
 | `decisions` | out | `[B, H, W, C]` bool | the blobs with at least `min_area` pixels |
 
-hparams: `min_area` (default 250, >= 0; `0` / `1` keep everything). Stateless; connected
-components by OpenCV on the CPU, not differentiable (boolean masks).
+hparams: `min_area` (default 250, >= 0; `0` / `1` keep everything), `cell` (default 4, >= 1).
+Stateless, not differentiable (boolean masks); an empty mask is returned without work.
 
 ## ScoreMapSmoothing
 
@@ -299,15 +305,37 @@ not saved), torch-native, differentiable.
 `cuvis_ai_patchcore.node.objectness.SpectralObjectMask` marks a pixel as an object where its
 spectral angle to the frame's median spectrum (the background's, when it covers most of the
 frame) exceeds `min_angle_deg` (default 6.0), computed on every `stride`-th pixel (default 4) and
-expanded by nearest neighbour. Brightness-invariant (shadows stay background) and relative to
+expanded by nearest neighbour; the median runs over every `median_stride`-th pixel (default 8). Brightness-invariant (shadows stay background) and relative to
 the same frame (a white-reference error shifts background and objects alike); class-agnostic
 (any material that differs from the background is an object, known or not). Outputs
 `decisions` `[B, H, W, 1]` bool and `angle` `[B, H/s, W/s, 1]` float32.
 
-`cuvis_ai_patchcore.node.morphology.MaskBlobGate` keeps the 8-connected blobs of `decisions`
-that hold at least `min_px` (default 16) pixels of `mask` (any channel). With the object mask as
-`mask`, an anomaly blob on the empty background goes, one around an object (halo included)
-stays. A foreign object with the background's own spectrum is not an object to it.
+`cuvis_ai_patchcore.node.morphology.MaskBlobGate` keeps the blobs of `decisions` (labelled on the
+cell grid of `MaskMinArea`) that hold at least `min_px` (default 16) pixels of `mask` (any
+channel). With the object mask as `mask`, an anomaly blob on the empty background goes, one
+around an object (halo included) stays. A foreign object with the background's own spectrum is
+not an object to it.
+
+## MaskBlobFilter
+
+`cuvis_ai_patchcore.node.objectness.MaskBlobFilter` — `MaskMinArea`, `SpectralObjectMask` and
+`MaskBlobGate` in one pass, for a live pipeline: one labelling of the cell grid, both tests per
+blob, nothing done on an empty mask, one small copy to the host. A blob is kept if it has at least
+`min_area` marked pixels and at least `min_object_px` of them lie in object cells: cells whose
+first pixel (the stride-`cell` grid) has a spectral angle above `min_angle_deg` to the per-band
+median of every `median_stride`-th pixel. Identical to the three-node chain with the same
+parameters (tested).
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | e.g. a `FrameScoreGate`'s decisions |
+| `cube` | in, optional | `[B, H, W, K]` float32 | the frames' cube; without it only the size test runs |
+| `decisions` | out | `[B, H, W, C]` bool | the blobs that pass both tests |
+
+hparams: `min_area` (250), `min_object_px` (16; `0` skips the object test), `min_angle_deg` (6.0),
+`cell` (4), `median_stride` (8). Stateless, not differentiable. On a 1000 x 1080 x 61 frame with
+FO marks it takes about 1 ms on an RTX 4070 laptop GPU, 0.1 ms on a clean frame; with
+`MaskPersistence` behind it the two walnut FO pipelines run +1.5 to +2.7 ms per FO frame.
 
 ## Install
 
@@ -333,11 +361,12 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing
   - class_name: cuvis_ai_patchcore.node.objectness.SpectralObjectMask
   - class_name: cuvis_ai_patchcore.node.morphology.MaskBlobGate
+  - class_name: cuvis_ai_patchcore.node.objectness.MaskBlobFilter
 ```
 
 For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
 `ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapSmoothing`, `SpectralObjectMask`,
-`MaskBlobGate`,
+`MaskBlobGate`, `MaskBlobFilter`,
 `ScoreMapFusion(softmin)` and
 `ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 

@@ -65,31 +65,42 @@ class MaskPersistence(Node):
         self.radius_px = int(radius_px)
         super().__init__(radius_px=self.radius_px, **kwargs)
         self._previous: Tensor | None = None  # the last frame's input mask (runtime only)
+        self._previous_any = False  # whether it has a set pixel (saves a GPU sync per frame)
 
     def reset(self) -> None:
         """Forget the previous frame, so the next frame shows nothing (e.g. a new recording)."""
         self._previous = None
+        self._previous_any = False
 
     def _near(self, masks: Tensor) -> Tensor:
-        """Square dilation by ``radius_px`` of boolean masks [N, H, W, C] (separable max-pool)."""
+        """Square dilation by ``radius_px`` of boolean masks [N, H, W, C]: a box sum over the
+        integral image (exact, one pass whatever the radius; int32 sums, frames < 2**31 px)."""
         if self.radius_px == 0:
             return masks
-        k, r = 2 * self.radius_px + 1, self.radius_px
-        x = masks.permute(0, 3, 1, 2).to(torch.float32)
-        # max over the square window = max over its rows, then over its columns; the implicit
-        # padding never wins the max, so the image border adds nothing
-        x = torch.nn.functional.max_pool2d(x, kernel_size=(1, k), stride=1, padding=(0, r))
-        x = torch.nn.functional.max_pool2d(x, kernel_size=(k, 1), stride=1, padding=(r, 0))
-        return (x > 0).permute(0, 2, 3, 1)
+        r, k = self.radius_px, 2 * self.radius_px + 1
+        x = masks.permute(0, 3, 1, 2).to(torch.int32)
+        s = torch.nn.functional.pad(x, (r + 1, r, r + 1, r))
+        s = s.cumsum(2, dtype=torch.int32).cumsum(3, dtype=torch.int32)  # int64 is 2x slower
+        box = s[..., k:, k:] - s[..., :-k, k:] - s[..., k:, :-k] + s[..., :-k, :-k]
+        return (box > 0).permute(0, 2, 3, 1)
 
     def forward(self, decisions: Tensor, **_: Any) -> dict[str, Tensor]:
         """Return each frame's mask pixels near the previous frame's mask; remember the last."""
         if decisions.shape[0] == 0:
             return {"decisions": decisions.clone()}
-        prev = self._previous
+        prev, prev_any = self._previous, self._previous_any
         if prev is None or prev.shape != decisions.shape[1:] or prev.device != decisions.device:
-            prev = torch.zeros_like(decisions[0])
+            prev, prev_any = torch.zeros_like(decisions[0]), False
+        if decisions.shape[0] == 1:
+            now_any = bool(decisions.any())
+            if not (now_any and prev_any):  # this frame or the one before is empty
+                self._previous, self._previous_any = decisions[0].clone(), now_any
+                return {"decisions": torch.zeros_like(decisions)}
         # each frame's predecessor: the remembered frame for the first, the batch's own after that
-        before = torch.cat([prev.unsqueeze(0), decisions[:-1]], dim=0)
+        if decisions.shape[0] == 1:
+            before = prev.unsqueeze(0)
+        else:
+            before = torch.cat([prev.unsqueeze(0), decisions[:-1]], dim=0)
         self._previous = decisions[-1].clone()
+        self._previous_any = True if decisions.shape[0] == 1 else bool(self._previous.any())
         return {"decisions": decisions & self._near(before)}

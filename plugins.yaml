@@ -307,3 +307,25 @@ capabilities:
       optional: false
       description: The angle in degrees on the stride grid [B, ceil(H / s), ceil(W / s), 1].
   doc_summary: Mark the pixels whose spectral angle to the frame's median spectrum exceeds a threshold.
+- class_name: cuvis_ai_patchcore.node.objectness.MaskBlobFilter
+  category: transform
+  tags: [hyperspectral, mask, numpy, postprocessing]
+  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
+  input_specs:
+    decisions:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: Boolean mask [B, H, W, C] whose blobs are filtered, e.g. a FrameScoreGate's decisions; each frame and channel on its own.
+    cube:
+      dtype: float32
+      shape: [-1, -1, -1, -1]
+      optional: true
+      description: Hyperspectral cube [B, H, W, K] of the same frames, for the object test; without it only the size test runs.
+  output_specs:
+    decisions:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: 'Same shape: the blobs of `decisions` with at least `min_area` pixels that hold at least `min_object_px` pixels of non-background material.'
+  doc_summary: Keep the blobs of a boolean mask that are large enough and lie on non-background material.
