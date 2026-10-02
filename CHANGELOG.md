@@ -25,6 +25,10 @@
   (default 250). On the user-labelled walnut frames it halves the false FO blobs per FO frame
   (0.475 -> 0.215 for the deployed banks, 0.170 -> 0.060 for the refit) and loses no FO object
   (one stem frame of 73 for the refit); specks on the empty belt are 42 px (median), FO blobs 9050 px.
+- Added `ScoreMapSmoothing`: a score map convolved with a Gaussian of `sigma_px` (default 8,
+  separable, mirrored border), PatchCore's own post-processing, before the gate. With the 1-Oct
+  refit banks on the user's labels (sigma 8 + MaskMinArea 250): fake shells shown 106 -> 154 of
+  182, stems 60 -> 69 of 73, false blobs per FO frame 0.170 -> 0.090.
 
 ### Changed
 - `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the

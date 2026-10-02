@@ -12,7 +12,7 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships eleven nodes:
+The plugin ships twelve nodes:
 
 | Node | Role |
 |---|---|
@@ -27,6 +27,7 @@ The plugin ships eleven nodes:
 | [`ScoreMapSuppression`](#scoremapsuppression) | down-weights a score map inside a boolean mask shrunk by a margin (e.g. a segmenter's mask of objects that cannot be anomalous) |
 | [`MaskPersistence`](#maskpersistence) | keeps a mask pixel only where the previous frame's mask lies within a radius, so one-frame flickers never show |
 | [`MaskMinArea`](#maskminarea) | drops the blobs of a mask below a pixel count, e.g. specks on an empty background |
+| [`ScoreMapSmoothing`](#scoremapsmoothing) | Gaussian smoothing of a score map (PatchCore's post-processing) |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -275,6 +276,22 @@ halo; specks from texture or noise on an empty background are a few dozen pixels
 hparams: `min_area` (default 250, >= 0; `0` / `1` keep everything). Stateless; connected
 components by OpenCV on the CPU, not differentiable (boolean masks).
 
+## ScoreMapSmoothing
+
+`cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing` — convolve a score map with a normalised
+Gaussian of `sigma_px` pixels (separable, radius round(4 sigma), mirrored border as OpenCV's
+BORDER_REFLECT_101). Isolated one-patch peaks drop, regions several patches agree on keep
+their level. Placed before a `FrameScoreGate`, so the alarm and the mask both see the smoothed
+map (calibrate the gate on the smoothed map).
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `scores` | in | `[B, H, W, C]` float32 | e.g. a fused anomaly map |
+| `scores` | out | `[B, H, W, C]` float32 | each channel smoothed |
+
+hparams: `sigma_px` (default 8.0, >= 0; `0` passes the map through). Stateless (the kernel is
+not saved), torch-native, differentiable.
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
@@ -296,10 +313,12 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapSuppression
   - class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
   - class_name: cuvis_ai_patchcore.node.morphology.MaskMinArea
+  - class_name: cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing
 ```
 
 For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
-`ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapFusion(softmin)` and
+`ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapSmoothing`,
+`ScoreMapFusion(softmin)` and
 `ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 
 ```yaml

@@ -4,7 +4,9 @@ A per-pixel spectral model (e.g. a Gaussian mixture over the bands) costs the sa
 a 1000 x 1080 cube it pays to score every ``s``-th pixel in both axes and interpolate the map back:
 ``GridSubsample`` takes the grid (``cube[:, ::s, ::s, :]``, the same samples PatchCore's ``stride``
 reads), ``ScoreUpsample`` resizes the grid's score map to the height and width of a reference tensor
-(bilinear by default, as ``PatchCoreDetector`` upsamples its own map). Both are stateless,
+(bilinear by default, as ``PatchCoreDetector`` upsamples its own map). ``ScoreMapSmoothing``
+convolves a score map with a Gaussian (PatchCore's own post-processing): isolated one-patch peaks
+drop, regions that several patches agree on keep their level. All three are stateless,
 torch-native and differentiable.
 """
 
@@ -108,3 +110,65 @@ class ScoreUpsample(Node):
             scores.permute(0, 3, 1, 2), size=size, mode=self.mode, align_corners=align
         )
         return {"scores": out.permute(0, 2, 3, 1)}
+
+
+class ScoreMapSmoothing(Node):
+    """Smooth a score map [B, H, W, C] with a Gaussian of ``sigma_px`` pixels."""
+
+    _category = NodeCategory.TRANSFORM
+    _tags = frozenset({NodeTag.ANOMALY, NodeTag.POSTPROCESSING, NodeTag.TORCH})
+
+    INPUT_SPECS = {
+        "scores": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, -1),
+            description="Score map [B, H, W, C], e.g. a fused anomaly map.",
+        ),
+    }
+    OUTPUT_SPECS = {
+        "scores": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, -1),
+            description="Same shape: each channel convolved with a normalised Gaussian of "
+            "`sigma_px` (radius round(4 sigma), mirrored border).",
+        ),
+    }
+
+    def __init__(self, sigma_px: float = 8.0, **kwargs: Any) -> None:
+        """Create a Gaussian smoothing of score maps (PatchCore's own post-processing).
+
+        Parameters
+        ----------
+        sigma_px : the Gaussian's standard deviation in pixels (default 8.0); ``0`` passes the map
+            through. The kernel spans round(4 sigma) pixels on each side and is applied separably;
+            the border is mirrored (OpenCV's BORDER_REFLECT_101), or repeated when the map is
+            narrower than the kernel.
+        """
+        if (
+            isinstance(sigma_px, bool)
+            or not isinstance(sigma_px, (int, float))
+            or not 0.0 <= float(sigma_px) < float("inf")
+        ):
+            raise ValueError(
+                f"ScoreMapSmoothing: sigma_px must be a finite number >= 0, got {sigma_px!r}."
+            )
+        self.sigma_px = float(sigma_px)
+        super().__init__(sigma_px=self.sigma_px, **kwargs)
+        self.radius = int(round(4.0 * self.sigma_px))
+        x = torch.arange(-self.radius, self.radius + 1, dtype=torch.float32)
+        k = torch.exp(-0.5 * (x / max(self.sigma_px, 1e-12)) ** 2)
+        self.register_buffer("_kernel", k / k.sum(), persistent=False)  # not saved in the .pt
+
+    def forward(self, scores: Tensor, **_: Any) -> dict[str, Tensor]:
+        """Return the Gaussian-smoothed map."""
+        if self.radius == 0:
+            return {"scores": scores.clone()}
+        b, h, w, c = scores.shape
+        x = scores.permute(0, 3, 1, 2).reshape(b * c, 1, h, w)
+        k = self._kernel.to(dtype=x.dtype)
+        r = self.radius
+        mode_w = "reflect" if r < w else "replicate"
+        mode_h = "reflect" if r < h else "replicate"
+        x = F.conv2d(F.pad(x, (r, r, 0, 0), mode=mode_w), k.view(1, 1, 1, -1))
+        x = F.conv2d(F.pad(x, (0, 0, r, r), mode=mode_h), k.view(1, 1, -1, 1))
+        return {"scores": x.reshape(b, c, h, w).permute(0, 2, 3, 1)}
