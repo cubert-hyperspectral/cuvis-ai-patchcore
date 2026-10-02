@@ -12,7 +12,7 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships eight nodes:
+The plugin ships ten nodes:
 
 | Node | Role |
 |---|---|
@@ -25,6 +25,7 @@ The plugin ships eight nodes:
 | [`GridSubsample`](#gridsubsample-and-scoreupsample) | every `stride`-th pixel of a cube, to score a per-pixel model on a coarse grid |
 | [`ScoreUpsample`](#gridsubsample-and-scoreupsample) | resizes a grid's score map to the height and width of a reference tensor |
 | [`ScoreMapSuppression`](#scoremapsuppression) | down-weights a score map inside a boolean mask shrunk by a margin (e.g. a segmenter's mask of objects that cannot be anomalous) |
+| [`MaskPersistence`](#maskpersistence) | keeps a mask pixel only where the previous frame's mask lies within a radius, so one-frame flickers never show |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -239,6 +240,25 @@ hparams: `weight` (default 1.0, in `[0, 1]`: the share of the score removed insi
 an object touching a masked one keeps its score along the shared edge; the image border does not
 shrink the mask. Stateless, differentiable in `scores`.
 
+## MaskPersistence
+
+`cuvis_ai_patchcore.node.temporal.MaskPersistence` — a frame-to-frame filter for the object mask
+of a moving scene (a turntable, a belt): a pixel of the current mask is kept only if the previous
+frame's mask has a set pixel within `radius_px` of it. A real object stays in view and moves a
+bounded distance per frame, so it shows from its second frame on; a blob that lives for one frame
+(sensor noise, motion blur) never shows. Placed after a `FrameScoreGate`'s `decisions`, before
+the viewers of the mask.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | consecutive frames, batch order = time order |
+| `decisions` | out | `[B, H, W, C]` bool | the pixels with a previous-frame pixel (same channel) within `radius_px`; none on the first frame |
+
+hparams: `radius_px` (default 40, >= 0): half the side of the square window, at least the
+largest distance an object moves between two frames. Runtime state only (the last frame's input
+mask, not serialized): the first frame after loading, after `reset()` or after a change of mask
+shape or device shows nothing. Not differentiable (boolean masks).
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
@@ -257,11 +277,13 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
   - class_name: cuvis_ai_patchcore.node.spatial.GridSubsample
   - class_name: cuvis_ai_patchcore.node.spatial.ScoreUpsample
+  - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapSuppression
+  - class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
 ```
 
 For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
-`ScoreMapFusion(softmin)` and `ScoreRangeNormalizer(invert)` are not released yet, see the
-changelog):
+`ScoreMapSuppression`, `MaskPersistence`, `ScoreMapFusion(softmin)` and
+`ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 
 ```yaml
 name: patchcore

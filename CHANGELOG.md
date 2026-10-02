@@ -15,6 +15,12 @@
 - Added `ScoreMapSuppression`: a score map scaled by `1 - weight` inside a boolean mask shrunk by
   `erode_px` (defaults 1.0 / 4), e.g. an FO anomaly map inside a segmenter's shell mask, so that
   the detector cannot alarm on walnut shells smeared by motion.
+- Added `MaskPersistence`: keeps a pixel of a boolean mask only if the previous frame's mask has a
+  set pixel within `radius_px` (default 40, square window); the first frame shows nothing. Behind
+  the walnut FO gate, real objects on the turntable stay in view while one-frame false blobs go
+  (labelled 1-Oct frames: false blobs per FO frame 0.47 -> 0.25 with the deployed banks, 0.17 ->
+  0.07 with the refit; each FO material shows on 1-4 fewer frames, mostly an object's first frame,
+  stems on 4-7 fewer). Runtime state only, nothing serialized.
 
 ### Changed
 - `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the

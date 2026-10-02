@@ -15,6 +15,7 @@ from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
 from cuvis_ai_patchcore.node.fusion import DecisionFusion, MaskComposite, ScoreMapFusion
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
+from cuvis_ai_patchcore.node.temporal import MaskPersistence
 
 pytestmark = pytest.mark.integration
 
@@ -32,6 +33,7 @@ def test_manifest_registers_plugin_and_resolves_nodes():
     assert registry.get("FrameScoreGate") is FrameScoreGate
     assert registry.get("DecisionFusion") is DecisionFusion
     assert registry.get("MaskComposite") is MaskComposite
+    assert registry.get("MaskPersistence") is MaskPersistence
 
 
 def test_manifest_capabilities_are_importable_nodes():

@@ -26,6 +26,7 @@ from cuvis_ai_patchcore.node.fusion import (
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 from cuvis_ai_patchcore.node.spatial import GridSubsample, ScoreUpsample
+from cuvis_ai_patchcore.node.temporal import MaskPersistence
 
 pytestmark = pytest.mark.integration
 
@@ -452,3 +453,60 @@ def test_suppressed_gate_pipeline_reloads(tmp_path):
     after = restored.forward(batch={}, context=ctx)
     for key in (("sup", "scores"), ("gate", "frame_score"), ("gate", "scores")):
         assert torch.allclose(after[key], before[key], atol=1e-6), key
+
+
+def test_persistent_mask_pipeline_reloads(tmp_path):
+    """FrameScoreGate.decisions -> MaskPersistence -> MaskComposite, the walnut flicker filter: the
+    radius survives save -> load, the .pt holds nothing for the filter, and both the built and the
+    restored pipeline show the gate's mask from the second frame on (the first frame shows none)."""
+    src = _ConstantCubeSource(seed=5, name="src")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    cal = ScoreRangeNormalizer(fit_subsample=1, name="cal")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    cal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    gate = FrameScoreGate(threshold=0.0, mask_threshold=0.5, name="gate")
+    persist = MaskPersistence(radius_px=3, name="persist")
+    comp = MaskComposite(labels=[2], levels=[1.0], name="comp")
+    pipe = CuvisPipeline("persistent_mask_smoke")
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, cal.inputs.scores)
+    pipe.connect(cal.outputs.normalized, gate.inputs.scores)
+    pipe.connect(gate.outputs.decisions, persist.inputs.decisions)
+    pipe.connect(persist.outputs.decisions, comp.inputs.decisions)
+
+    def two_frames(p: CuvisPipeline) -> tuple[dict, dict]:
+        ctx = Context(stage=ExecutionStage.INFERENCE)
+        return p.forward(batch={}, context=ctx), p.forward(batch={}, context=ctx)
+
+    first, second = two_frames(pipe)
+    mask = first[("gate", "decisions")]
+    assert mask.any() and not mask.all()
+    assert not first[("persist", "decisions")].any() and not first[("comp", "mask")].any()
+    assert torch.equal(second[("persist", "decisions")], mask)  # same frame twice: all persists
+    assert torch.equal(second[("comp", "mask")], mask[..., 0].to(torch.int32) * 2)
+
+    yaml_path = tmp_path / "persistent.yaml"
+    pipe.save_to_file(str(yaml_path))
+    weights = torch.load(yaml_path.with_suffix(".pt"), map_location="cpu", weights_only=False)
+    assert len(weights["state_dict"].get("persist", {})) == 0
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert isinstance(nodes["persist"], MaskPersistence)
+    assert nodes["persist"].hparams["radius_px"] == 3
+    again_first, again_second = two_frames(restored)
+    assert not again_first[("comp", "mask")].any()
+    for key in (("gate", "decisions"), ("persist", "decisions"), ("comp", "mask")):
+        assert torch.equal(again_second[key], second[key]), key

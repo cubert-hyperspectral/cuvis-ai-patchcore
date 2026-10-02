@@ -212,3 +212,20 @@ capabilities:
       optional: false
       description: 'scores x (1 - weight x the eroded mask): unchanged outside the mask and within `erode_px` of its edge, scaled by 1 - weight inside.'
   doc_summary: Down-weight a score map [B, H, W, 1] inside a boolean mask shrunk by ``erode_px``.
+- class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
+  category: transform
+  tags: [mask, postprocessing, stateful, torch]
+  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
+  input_specs:
+    decisions:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: Boolean mask [B, H, W, C] of consecutive frames (batch order is time order), e.g. a FrameScoreGate's decisions; each channel is filtered on its own.
+  output_specs:
+    decisions:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: "Same shape: the pixels of `decisions` with a set pixel of the previous frame's mask (same channel) within `radius_px`; all False on the first frame."
+  doc_summary: Keep the pixels of a boolean mask [B, H, W, C] that the previous frame's mask has nearby.
