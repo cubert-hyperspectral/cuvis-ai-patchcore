@@ -109,6 +109,11 @@ capabilities:
       shape: [-1, -1, -1, -1]
       optional: false
       description: 'Boolean mask, same shape as `scores`: the pixels of the display map above `mask_threshold` (default `threshold`) on passing frames, all False on the others. Viewers show a `decisions` port as a mask overlay.'
+    core:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: 'Boolean mask, same shape as `scores`: the pixels of the display map above `core_ratio` x `mask_threshold` on passing frames (equal to `decisions` with the default ratio 1): the confident core of the mask.'
   doc_summary: Zero a display map unless its per-frame top-k score exceeds a threshold (heatmap or mask).
 - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
   category: transform

@@ -157,12 +157,14 @@ fusion map.
 | `frame_score` | out | `[B]` float32 | raw per-frame alarm score |
 | `passed` | out | `[B]` int32 | 1 when the (smoothed) score > `threshold` |
 | `decisions` | out | `[B, H, W, C]` bool | object mask: display-map pixels above `mask_threshold` on passing frames, all False otherwise |
+| `core` | out | `[B, H, W, C]` bool | the confident core of the mask: pixels above `core_ratio` x `mask_threshold` on passing frames (= `decisions` by default) |
 
 hparams: `threshold` (required; set above the session's clean band) · `topk_frac` 0.001 · `mode`
 `heatmap` | `mask` · `mask_threshold` (default `threshold`; the cutoff of `decisions`, and of
 `scores` in `mask` mode) · `log_scores` false (log every frame decision and the display map's
 highest pixel `pmax` at INFO, for calibrating both thresholds on a live session) · `smooth_k` 1 (> 1: gate on the rolling median of the last k frame scores; runtime
-state, one frame per forward). Stateless otherwise: the thresholds are hyper-parameters, not fitted
+state, one frame per forward) · `core_ratio` 1.0 (>= 1; the cutoff of `core` relative to
+`mask_threshold`, so it follows a recalibration). Stateless otherwise: the thresholds are hyper-parameters, not fitted
 buffers, because the operating point drifts with the session.
 
 **Object mask.** Set `mask_threshold` on the display map's own scale, e.g. to the highest pixel of
@@ -176,6 +178,11 @@ Two gates fused by `ScoreMapFusion(mode="first")` make an OR alarm with a priori
 gate alarms on its own detector, and the output shows the first detector's map whenever its gate
 opens, the second detector's map only on frames the first gate misses. Their `decisions` fused by
 `DecisionFusion(mode="first")` give the mask of the displayed map.
+
+**Core.** A step that cuts the mask afterwards (e.g. to the objects of a frame) can fuse `core` back
+in (`DecisionFusion("any")`), so a clear detection always stays shown. The walnut FO cut uses
+`core_ratio` 1.3: loose stems, marked at 1.5-1.7 x the mask threshold but not seen as objects by
+the spectral angle, keep their mark.
 
 ## DecisionFusion
 

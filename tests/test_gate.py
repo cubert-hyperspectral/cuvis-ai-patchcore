@@ -78,6 +78,7 @@ def test_port_contract():
     assert out["frame_score"].shape == (3,) and out["frame_score"].dtype == torch.float32
     assert out["passed"].shape == (3,) and out["passed"].dtype == torch.int32
     assert out["decisions"].shape == (3, 8, 8, 1) and out["decisions"].dtype == torch.bool
+    assert out["core"].shape == (3, 8, 8, 1) and out["core"].dtype == torch.bool
     assert set(out) == set(FrameScoreGate.OUTPUT_SPECS)
 
 
@@ -125,6 +126,32 @@ def test_decisions_follow_the_smoothed_gate():
     for v in (0.1, 0.1, 5.0, 5.0):  # the isolated spike stays closed; the sustained one opens
         masked.append(bool(node(scores=torch.full((1, 2, 2, 1), v))["decisions"].any()))
     assert masked == [False, False, False, True]
+
+
+def test_core_is_the_confident_part_of_the_mask():
+    x = torch.full((2, 4, 4, 1), 0.1, dtype=torch.float32)
+    x[:, 0, :, 0] = torch.tensor([1.2, 1.4, 2.0, 5.0])  # both frames: hot row
+    alarm = torch.full((2, 4, 4, 1), 0.1, dtype=torch.float32)
+    alarm[1] = 5.0  # only frame 1 passes
+    node = FrameScoreGate(threshold=1.0, topk_frac=0.25, mask_threshold=1.0, core_ratio=1.3)
+    out = node(scores=x, alarm_scores=alarm)
+    assert not out["core"][0].any() and not out["decisions"][0].any()  # blank frame: no core
+    assert torch.equal(out["core"][1], x[1] > 1.3)  # 3 pixels: 1.4, 2.0, 5.0
+    assert int(out["core"][1].sum()) == 3 and int(out["decisions"][1].sum()) == 4
+    assert not (out["core"] & ~out["decisions"]).any()  # a subset of the mask
+    assert node.hparams["core_ratio"] == 1.3
+
+
+def test_core_defaults_to_the_decisions():
+    out = FrameScoreGate(threshold=1.0, topk_frac=0.25)(scores=_scores())
+    assert torch.equal(out["core"], out["decisions"])
+    assert FrameScoreGate(threshold=1.0).hparams["core_ratio"] == 1.0
+
+
+@pytest.mark.parametrize("kw", [{"core_ratio": 0.9}, {"core_ratio": True}, {"core_ratio": "1.3"}])
+def test_invalid_core_ratio_raises(kw):
+    with pytest.raises(ValueError):
+        FrameScoreGate(threshold=1.0, **kw)
 
 
 @pytest.mark.parametrize(

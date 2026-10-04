@@ -7,6 +7,10 @@ zeros), and only above-threshold frames show their heatmap (or a binary mask). T
 ``decisions`` output is the object mask of a passing frame: its pixels above ``mask_threshold``.
 Calibrated on clean frames (e.g. their highest pixel), an absolute ``mask_threshold`` gives a mask
 whose area follows the object, where a per-frame quantile would mark the same area on every frame.
+The ``core`` output marks the confident part of that mask, the pixels above ``core_ratio`` x
+``mask_threshold``: a post-processing step that cuts the mask (e.g. to the objects of a frame) can
+put it back, so it never removes a clear detection; it follows ``mask_threshold`` when that is
+recalibrated.
 
 By default the alarm score is read from the map that is displayed. The optional ``alarm_scores``
 input alarms on a *different* map than the one shown, e.g. alarm on a robust feature bank while
@@ -86,6 +90,13 @@ class FrameScoreGate(Node):
             "above `mask_threshold` (default `threshold`) on passing frames, all False on the "
             "others. Viewers show a `decisions` port as a mask overlay.",
         ),
+        "core": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Boolean mask, same shape as `scores`: the pixels of the display map above "
+            "`core_ratio` x `mask_threshold` on passing frames (equal to `decisions` with the "
+            "default ratio 1): the confident core of the mask.",
+        ),
     }
 
     def __init__(
@@ -96,6 +107,7 @@ class FrameScoreGate(Node):
         mask_threshold: float | None = None,
         log_scores: bool = False,
         smooth_k: int = 1,
+        core_ratio: float = 1.0,
         **kwargs: Any,
     ) -> None:
         """Create the gate.
@@ -117,6 +129,10 @@ class FrameScoreGate(Node):
             band of both thresholds). Off in production.
         smooth_k : gate on a rolling median of the last ``smooth_k`` frame scores (default 1 = no
             smoothing). Runtime-only state (not serialized); assumes one frame per forward.
+        core_ratio : the ``core`` output marks the pixels above ``core_ratio`` x ``mask_threshold``
+            on passing frames (default 1.0: the pixels of ``decisions``; must be >= 1, for a
+            positive ``mask_threshold``). E.g. 1.3 keeps the confident part of a mark through a
+            cut of the mask to the objects.
         """
         if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
             raise ValueError(f"threshold must be a number, got {threshold!r}")
@@ -129,12 +145,19 @@ class FrameScoreGate(Node):
             raise ValueError(f"mask_threshold must be a number or None, got {mask_threshold!r}")
         if isinstance(smooth_k, bool) or not isinstance(smooth_k, int) or smooth_k < 1:
             raise ValueError(f"smooth_k must be an integer >= 1, got {smooth_k!r}")
+        if (
+            isinstance(core_ratio, bool)
+            or not isinstance(core_ratio, (int, float))
+            or not core_ratio >= 1.0
+        ):
+            raise ValueError(f"core_ratio must be a number >= 1, got {core_ratio!r}")
         self.threshold = float(threshold)
         self.topk_frac = float(topk_frac)
         self.mode = str(mode)
         self.mask_threshold = None if mask_threshold is None else float(mask_threshold)
         self.log_scores = bool(log_scores)
         self.smooth_k = int(smooth_k)
+        self.core_ratio = float(core_ratio)
         self._recent: list[float] = []  # rolling frame scores for smoothing (runtime only)
         super().__init__(
             threshold=self.threshold,
@@ -143,6 +166,7 @@ class FrameScoreGate(Node):
             mask_threshold=self.mask_threshold,
             log_scores=self.log_scores,
             smooth_k=self.smooth_k,
+            core_ratio=self.core_ratio,
             **kwargs,
         )
 
@@ -186,9 +210,12 @@ class FrameScoreGate(Node):
                     f"pmax={float(peak[i]):.4f}"
                 )
 
+        decisions = hot & gate
+        core = decisions if self.core_ratio == 1.0 else (scores > self.core_ratio * thr) & gate
         return {
             "scores": base * gate.to(scores.dtype),
             "frame_score": frame.to(torch.float32),
             "passed": passed.to(torch.int32),
-            "decisions": hot & gate,
+            "decisions": decisions,
+            "core": core,
         }

@@ -50,6 +50,11 @@
 - Added `threshold="otsu"` (each frame's Otsu level of the angle map, clipped to
   `otsu_floor_deg` / `otsu_ceiling_deg`), `fill` (closing + hole filling on the stride grid) and
   `dilate_px` (the full-size mask grown) to `SpectralObjectMask`; defaults unchanged.
+- Added `core_ratio` (default 1.0) and the output `core` to `FrameScoreGate`: the pixels above
+  `core_ratio` x `mask_threshold` on passing frames, the confident core of the mask, to fuse back in
+  after a cut of the mask (it follows `mask_threshold` when that is recalibrated). With the walnut
+  FO cut at 1.3 the loose stems of the 2 Oct production recording keep their marks (marks removed
+  that the uncut mask shows: 74 -> 8, none on a stem).
 - Added `invert` to `MaskBlobGate` (default `False`, unchanged): keeps the other blobs, those with
   fewer than `min_px` pixels of the gating mask. With `min_px=1`, a mask before a cut as
   `decisions` and the mask after it as `mask`, these are the marks the cut removed entirely; fused
