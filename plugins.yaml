@@ -300,7 +300,7 @@ capabilities:
       dtype: bool
       shape: [-1, -1, -1, 1]
       optional: false
-      description: "Object mask [B, H, W, 1]: spectral angle to the frame's median spectrum above `min_angle_deg` (on the stride grid, nearest neighbour to H, W)."
+      description: "Object mask [B, H, W, 1]: spectral angle to the frame's median spectrum above the threshold (on the stride grid, nearest neighbour to H, W), filled and grown when `fill` / `dilate_px` are set."
     angle:
       dtype: float32
       shape: [-1, -1, -1, 1]
@@ -329,3 +329,30 @@ capabilities:
       optional: false
       description: 'Same shape: the blobs of `decisions` with at least `min_area` pixels that hold at least `min_object_px` pixels of non-background material.'
   doc_summary: Keep the blobs of a boolean mask that are large enough and lie on non-background material.
+- class_name: cuvis_ai_patchcore.node.morphology.MaskPeakGate
+  category: transform
+  tags: [mask, numpy, postprocessing]
+  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
+  input_specs:
+    decisions:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: Boolean mask [B, H, W, C] whose blobs are kept or dropped, e.g. the pieces of a mask after a cut.
+    reference:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: Boolean mask [B, H, W, C'] of the same batch, height and width (a pixel counts where any channel is set) whose blobs set the peak to reach, e.g. the mask before the cut.
+    scores:
+      dtype: float32
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: Score map [B, H, W, C''] the peaks are read from (the first channel), e.g. the anomaly map the mask was thresholded from; positive where marked.
+  output_specs:
+    decisions:
+      dtype: bool
+      shape: [-1, -1, -1, -1]
+      optional: false
+      description: 'Same shape as `decisions`: the blobs whose highest score reaches `ratio` times the highest score of the reference blob they lie in; blobs outside every reference blob stay.'
+  doc_summary: Keep the blobs of a mask whose peak score reaches a share of their reference blob's peak.

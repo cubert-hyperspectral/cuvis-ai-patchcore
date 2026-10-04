@@ -31,6 +31,7 @@ The plugin ships fourteen nodes:
 | [`SpectralObjectMask`](#spectralobjectmask-and-maskblobgate) | marks the pixels that are not the background material (spectral angle to the frame's median) |
 | [`MaskBlobGate`](#spectralobjectmask-and-maskblobgate) | keeps the blobs of a mask that hold enough pixels of a second mask (e.g. objects) |
 | [`MaskBlobFilter`](#maskblobfilter) | MaskMinArea + SpectralObjectMask + MaskBlobGate in one lazy pass, for a live pipeline |
+| [`MaskPeakGate`](#maskpeakgate-and-the-pixel-level-cut) | keeps the blobs of a mask whose peak score reaches a share of the peak of their reference blob |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -305,16 +306,50 @@ not saved), torch-native, differentiable.
 `cuvis_ai_patchcore.node.objectness.SpectralObjectMask` marks a pixel as an object where its
 spectral angle to the frame's median spectrum (the background's, when it covers most of the
 frame) exceeds `min_angle_deg` (default 6.0), computed on every `stride`-th pixel (default 4) and
-expanded by nearest neighbour; the median runs over every `median_stride`-th pixel (default 8). Brightness-invariant (shadows stay background) and relative to
-the same frame (a white-reference error shifts background and objects alike); class-agnostic
-(any material that differs from the background is an object, known or not). Outputs
-`decisions` `[B, H, W, 1]` bool and `angle` `[B, H/s, W/s, 1]` float32.
+expanded by nearest neighbour; the median runs over every `median_stride`-th pixel (default 8).
+Brightness-invariant (shadows stay background) and relative to the same frame (a white-reference
+error shifts background and objects alike); class-agnostic (any material that differs from the
+background is an object, known or not). Outputs `decisions` `[B, H, W, 1]` bool and `angle`
+`[B, H/s, W/s, 1]` float32. Options (defaults keep the fixed threshold):
+- `threshold="otsu"`: each frame's Otsu level of the angle map (0.1 deg steps, OpenCV), clipped
+  to `[otsu_floor_deg, otsu_ceiling_deg]` (default 3 / 12), instead of `min_angle_deg`;
+- `fill=True`: closes 1-cell gaps (3 x 3) and fills the holes of the objects on the stride grid;
+- `dilate_px`: grows the full-size mask by that many pixels (a margin around each object; on the
+  stride grid when it is a multiple of `stride`, exact).
 
 `cuvis_ai_patchcore.node.morphology.MaskBlobGate` keeps the blobs of `decisions` (labelled on the
 cell grid of `MaskMinArea`) that hold at least `min_px` (default 16) pixels of `mask` (any
 channel). With the object mask as `mask`, an anomaly blob on the empty background goes, one
 around an object (halo included) stays. A foreign object with the background's own spectrum is
 not an object to it.
+
+## MaskPeakGate and the pixel-level cut
+
+`cuvis_ai_patchcore.node.morphology.MaskPeakGate` keeps the blobs of `decisions` (on the cell grid
+of `MaskMinArea`) whose highest `scores` value reaches `ratio` (default 0.8) times the highest score
+of the `reference` blob they lie in; a blob outside every reference blob stays.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | e.g. the pieces of an anomaly mask after a cut |
+| `reference` | in | `[B, H, W, C']` bool | e.g. the mask before the cut (any channel counts) |
+| `scores` | in | `[B, H, W, C'']` float32 | the map the mask was thresholded from (first channel), finite where marked |
+| `decisions` | out | `[B, H, W, C]` bool | the blobs that reach `ratio` x their reference peak |
+
+hparams: `ratio` (0.8, in [0, 1]; `0` keeps everything), `cell` (4). Stateless, not
+differentiable; an empty mask is returned without work.
+
+The pixel-level cut of an anomaly mask to the objects, four nodes after the gate (walnut FO,
+`walnut_final_robust_v2/*_cut`):
+1. `SpectralObjectMask(threshold="otsu", otsu_floor_deg=2, fill=True, dilate_px=4)`: the objects plus 4 px;
+2. `DecisionFusion(mode="all")`: the mask AND the objects;
+3. `MaskMinArea(min_area=100)`: leftover pieces under 100 px go;
+4. `MaskPeakGate(ratio=0.8)` with the uncut mask as `reference` and the gate's input map as `scores`:
+   halo pieces left on neighbouring objects, far below the mark's peak, go.
+On the walnut FO stand this removes about 88 % of the marked area off the FOs and shells and nearly
+all marks left on the empty belt (0.02-0.07 per frame remain), with no FO lost on the labelled 1-Oct
+frames (4 of 240 on a fast turntable); about +2 ms per frame with marks on an RTX 4070 laptop GPU
+(+1 ms without).
 
 ## MaskBlobFilter
 
@@ -362,11 +397,12 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.objectness.SpectralObjectMask
   - class_name: cuvis_ai_patchcore.node.morphology.MaskBlobGate
   - class_name: cuvis_ai_patchcore.node.objectness.MaskBlobFilter
+  - class_name: cuvis_ai_patchcore.node.morphology.MaskPeakGate
 ```
 
 For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
 `ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapSmoothing`, `SpectralObjectMask`,
-`MaskBlobGate`, `MaskBlobFilter`,
+`MaskBlobGate`, `MaskBlobFilter`, `MaskPeakGate`,
 `ScoreMapFusion(softmin)` and
 `ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 

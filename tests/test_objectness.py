@@ -117,3 +117,128 @@ def test_hparams_round_trip_json():
     json.dumps(hp)
     d = SpectralObjectMask().hparams
     assert d["min_angle_deg"] == 6.0 and d["stride"] == 4 and d["median_stride"] == 8
+
+
+# ---------------------------------------------------------------- threshold="otsu", fill, dilate_px
+def _objects_reference(
+    angle: np.ndarray,
+    threshold: str,
+    floor: float,
+    ceiling: float,
+    fill: bool,
+    dilate: int,
+    deg: float = 6.0,
+) -> np.ndarray:
+    """From the node's own angle map [h, w]: OpenCV's Otsu level (0.1 deg steps, clipped), closing
+    3 x 3 + scipy hole filling, nearest neighbour to H x W, OpenCV dilation."""
+    from scipy import ndimage
+
+    thr = deg
+    if threshold == "otsu":
+        q = np.clip(angle * 10, 0, 255).astype(np.uint8)
+        t, _ = cv2.threshold(q, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thr = min(max(t / 10.0, floor), ceiling)
+    o = angle > thr
+    if fill:
+        o = cv2.morphologyEx(o.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
+        o = ndimage.binary_fill_holes(o)
+    full = cv2.resize(o.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST) > 0
+    if dilate:
+        full = cv2.dilate(full.astype(np.uint8), np.ones((2 * dilate + 1,) * 2, np.uint8)) > 0
+    return full
+
+
+def _ring_cube(seed: int = 0) -> torch.Tensor:
+    """The belt cube with a second object that has a belt-coloured hole (a ring)."""
+    cube = _belt_cube(seed)
+    cube[0, 20:36, 20:36, :] = torch.linspace(0.5, 0.3, C)
+    cube[0, 26:30, 26:30, :] = torch.linspace(0.2, 0.6, C)  # the hole: belt spectrum
+    return cube
+
+
+@pytest.mark.parametrize("stride", [1, 4])
+@pytest.mark.parametrize(
+    ("threshold", "floor", "ceiling", "fill", "dilate"),
+    [
+        ("otsu", 3.0, 12.0, False, 0),
+        ("otsu", 2.0, 12.0, True, 4),
+        ("otsu", 0.0, 1.0, False, 0),
+        ("fixed", 3.0, 12.0, True, 0),
+        ("fixed", 3.0, 12.0, False, 3),
+    ],
+)
+def test_otsu_fill_dilate_match_the_opencv_reference(
+    stride, threshold, floor, ceiling, fill, dilate
+):
+    node = SpectralObjectMask(
+        stride=stride,
+        threshold=threshold,
+        otsu_floor_deg=floor,
+        otsu_ceiling_deg=ceiling,
+        fill=fill,
+        dilate_px=dilate,
+    )
+    out = node(cube=_ring_cube(stride))
+    exp = _objects_reference(
+        out["angle"][0, ..., 0].numpy(), threshold, floor, ceiling, fill, dilate
+    )
+    assert np.array_equal(out["decisions"][0, ..., 0].numpy(), exp)
+
+
+def test_fill_closes_the_hole_of_an_object():
+    plain = SpectralObjectMask(stride=1)(cube=_ring_cube())["decisions"][0, ..., 0]
+    filled = SpectralObjectMask(stride=1, fill=True)(cube=_ring_cube())["decisions"][0, ..., 0]
+    assert not plain[26:30, 26:30].any() and filled[26:30, 26:30].all()
+    assert filled[20:36, 20:36].all()
+
+
+def test_otsu_level_is_clipped_to_the_floor_and_ceiling():
+    a = SpectralObjectMask(stride=1, threshold="otsu", otsu_floor_deg=0.0, otsu_ceiling_deg=0.5)
+    b = SpectralObjectMask(stride=1, threshold="fixed", min_angle_deg=0.5)
+    cube = _belt_cube()
+    assert torch.equal(a(cube=cube)["decisions"], b(cube=cube)["decisions"])  # ceiling 0.5 wins
+
+
+def test_defaults_keep_the_fixed_threshold():
+    node = SpectralObjectMask()
+    assert (node.threshold, node.fill, node.dilate_px) == ("fixed", False, 0)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_otsu_fill_dilate_cuda_equals_cpu():
+    node = SpectralObjectMask(threshold="otsu", otsu_floor_deg=2.0, fill=True, dilate_px=4)
+    cube = _ring_cube()
+    cpu = node(cube=cube)["decisions"]
+    gpu = node(cube=cube.cuda())["decisions"]
+    assert gpu.is_cuda and torch.equal(gpu.cpu(), cpu)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"threshold": "mean"},
+        {"otsu_floor_deg": -1},
+        {"otsu_ceiling_deg": 200},
+        {"otsu_floor_deg": 8.0, "otsu_ceiling_deg": 4.0},
+        {"fill": 1},
+        {"dilate_px": -1},
+        {"dilate_px": 2.0},
+        {"dilate_px": True},
+    ],
+)
+def test_invalid_new_hparams_raise(bad):
+    with pytest.raises(ValueError):
+        SpectralObjectMask(**bad)
+
+
+def test_new_hparams_round_trip_json():
+    hp = SpectralObjectMask(threshold="otsu", otsu_floor_deg=2.0, fill=True, dilate_px=4).hparams
+    assert (
+        hp["threshold"],
+        hp["otsu_floor_deg"],
+        hp["otsu_ceiling_deg"],
+        hp["fill"],
+        hp["dilate_px"],
+    ) == ("otsu", 2.0, 12.0, True, 4)
+    json.dumps(hp)

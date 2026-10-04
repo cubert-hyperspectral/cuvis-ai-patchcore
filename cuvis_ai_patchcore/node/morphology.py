@@ -7,12 +7,15 @@ the threshold in specks of a few dozen pixels. ``MaskMinArea`` keeps a blob only
 ``decisions`` and before the viewers of the mask; the frame-level alarm is not changed by it.
 ``MaskBlobGate`` keeps a blob only if it holds at least ``min_px`` pixels of a second mask, e.g. a
 ``SpectralObjectMask``: an anomaly blob on the empty belt goes, one around an object stays.
-Both work on a grid of ``cell`` x ``cell`` pixel cells (default 4): the pixel counts per cell are
-summed on the GPU, only the small cell grid is labelled (8-connected, OpenCV on the CPU) and the
-decision per blob comes back as a cell mask. Areas and gate counts are exact pixel counts; the only
-difference to labelling every pixel is that marks whose cells touch form one blob (gaps of up to
-2 x cell - 1 pixels). ``cell=1`` labels every pixel. The nodes are not differentiable; the masks
-are boolean anyway.
+``MaskPeakGate`` keeps a blob only if its highest score reaches ``ratio`` x the highest score of the
+reference blob it lies in: after an anomaly mask is cut to the objects (``DecisionFusion("all")``
+with a grown ``SpectralObjectMask``), the piece holding the mark's peak stays and halo pieces left
+on neighbouring objects go. All work on a grid of ``cell`` x ``cell`` pixel cells (default 4): the
+pixel counts (or score maxima) per cell are computed on the GPU, only the small cell grid is
+labelled (8-connected, OpenCV on the CPU) and the decision per blob comes back as a cell mask. Areas
+and gate counts are exact pixel counts; the only difference to labelling every pixel is that marks
+whose cells touch form one blob (gaps of up to 2 x cell - 1 pixels). ``cell=1`` labels every pixel.
+The nodes are not differentiable; the masks are boolean anyway.
 """
 
 from __future__ import annotations
@@ -60,6 +63,50 @@ def _keep_blobs(occupied: np.ndarray, tests: list[tuple[np.ndarray, float]]) -> 
     return out.reshape(occupied.shape)
 
 
+def _cell_max(x: Tensor, cell: int) -> Tensor:
+    """Per-cell maxima of a [N, C, H, W] float tensor (the last partial cells included)."""
+    if cell == 1:
+        return x
+    return F.max_pool2d(x, kernel_size=cell, stride=cell, ceil_mode=True)
+
+
+def _segment_max(labels: np.ndarray, values: np.ndarray, n: int) -> np.ndarray:
+    """Per-label maxima of values (labels in [0, n)); -inf for labels without values. A sort and a
+    reduceat: much faster than np.maximum.at."""
+    out = np.full(n, -np.inf)
+    if labels.size:
+        order = np.argsort(labels, kind="stable")
+        lab, val = labels[order], values[order]
+        starts = np.flatnonzero(np.r_[True, lab[1:] != lab[:-1]])
+        out[lab[starts]] = np.maximum.reduceat(val, starts)
+    return out
+
+
+def _peak_keep(
+    occupied: np.ndarray, ref: np.ndarray, peak: np.ndarray, ref_peak: np.ndarray, ratio: float
+) -> np.ndarray:
+    """Cells of the 8-connected blobs of ``occupied`` whose peak reaches ``ratio`` x the highest
+    peak of the ``ref`` blobs they touch; a blob that touches no ``ref`` cell stays."""
+    n, lab = _label(occupied)
+    out = np.zeros(occupied.size, bool)
+    if n <= 1:
+        return out.reshape(occupied.shape)
+    m, rlab = _label(ref)
+    sel = occupied.ravel()
+    ls = lab.ravel()[sel].astype(np.int64)
+    rls = rlab.ravel()[sel].astype(np.int64)
+    blob_peak = _segment_max(ls, peak.ravel()[sel].astype(np.float64), n)
+    rsel = ref.ravel()
+    ref_blob_peak = _segment_max(
+        rlab.ravel()[rsel].astype(np.int64), ref_peak.ravel()[rsel].astype(np.float64), max(m, 1)
+    )
+    inside = rls > 0
+    compare = _segment_max(ls[inside], ref_blob_peak[rls[inside]], n)
+    keep = np.isneginf(compare) | (blob_peak >= ratio * compare)
+    out[sel] = keep[ls]
+    return out.reshape(occupied.shape)
+
+
 def _expand_cells(keep: Tensor, x: Tensor, cell: int) -> Tensor:
     """x [N, H, W, C] (bool) where its cell of ``keep`` [N, h, w, C] is set."""
     if cell == 1:
@@ -72,12 +119,16 @@ def _expand_cells(keep: Tensor, x: Tensor, cell: int) -> Tensor:
     return x & keep[:, :h, :w]
 
 
-def _filter_blobs(x: Tensor, weights: Tensor, threshold: float, cell: int) -> Tensor:
-    """The blobs of x [N, C, H, W] (bool) whose summed weights [N, C, H, W] reach the threshold,
-    labelled on the cell grid."""
-    occ = _cell_sums(x.to(torch.float32), cell) > 0
-    w = _cell_sums(weights, cell)
-    occ_np, w_np = occ.cpu().numpy(), w.cpu().numpy()
+def _filter_blobs(x: Tensor, weights: Tensor | None, threshold: float, cell: int) -> Tensor:
+    """The blobs of x [N, C, H, W] (bool) whose summed weights [N, C, H, W] (None: x's own pixel
+    counts) reach the threshold, labelled on the cell grid; one copy to the host."""
+    counts = _cell_sums(x.to(torch.float32), cell)
+    if weights is None:
+        occ_np = w_np = counts.cpu().numpy()
+    else:
+        host = torch.stack([counts, _cell_sums(weights, cell)]).cpu().numpy()
+        occ_np, w_np = host[0], host[1]
+    occ_np = occ_np > 0
     keep = np.zeros(occ_np.shape, bool)
     for i in range(occ_np.shape[0]):
         for c in range(occ_np.shape[1]):
@@ -133,7 +184,7 @@ class MaskMinArea(Node):
         if self.min_area <= 1 or decisions.numel() == 0 or not bool(decisions.any()):
             return {"decisions": decisions.clone()}
         x = decisions.permute(0, 3, 1, 2)
-        out = _filter_blobs(x, x.to(torch.float32), float(self.min_area), self.cell)
+        out = _filter_blobs(x, None, float(self.min_area), self.cell)
         return {"decisions": out.permute(0, 2, 3, 1)}
 
 
@@ -197,3 +248,94 @@ class MaskBlobGate(Node):
         w = (x & gate[:, None]).to(torch.float32)
         out = _filter_blobs(x, w, float(self.min_px), self.cell)
         return {"decisions": out.permute(0, 2, 3, 1)}
+
+
+class MaskPeakGate(Node):
+    """Keep the blobs of a mask whose peak score reaches a share of their reference blob's peak."""
+
+    _category = NodeCategory.TRANSFORM
+    _tags = frozenset({NodeTag.MASK, NodeTag.POSTPROCESSING, NodeTag.NUMPY})
+
+    INPUT_SPECS = {
+        "decisions": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Boolean mask [B, H, W, C] whose blobs are kept or dropped, e.g. the "
+            "pieces of a mask after a cut.",
+        ),
+        "reference": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Boolean mask [B, H, W, C'] of the same batch, height and width (a pixel "
+            "counts where any channel is set) whose blobs set the peak to reach, e.g. the mask "
+            "before the cut.",
+        ),
+        "scores": PortSpec(
+            dtype=torch.float32,
+            shape=(-1, -1, -1, -1),
+            description="Score map [B, H, W, C''] the peaks are read from (the first channel), "
+            "e.g. the anomaly map the mask was thresholded from; finite and positive where marked.",
+        ),
+    }
+    OUTPUT_SPECS = {
+        "decisions": PortSpec(
+            dtype=torch.bool,
+            shape=(-1, -1, -1, -1),
+            description="Same shape as `decisions`: the blobs whose highest score reaches `ratio` "
+            "times the highest score of the reference blob they lie in; blobs outside every "
+            "reference blob stay.",
+        ),
+    }
+
+    def __init__(self, ratio: float = 0.8, cell: int = 4, **kwargs: Any) -> None:
+        """Create a peak gate.
+
+        Parameters
+        ----------
+        ratio : share of the reference blob's peak a blob must reach to stay (default 0.8; ``0``
+            keeps every blob). After a cut of an anomaly mask to the objects, the piece holding the
+            mark's peak stays and halo pieces on neighbouring objects, far below it, go.
+        cell : side of the cells the blobs are labelled on (default 4; ``1`` labels every pixel).
+        """
+        if (
+            isinstance(ratio, bool)
+            or not isinstance(ratio, (int, float))
+            or not 0.0 <= ratio <= 1.0
+        ):
+            raise ValueError(f"MaskPeakGate: ratio must be in [0, 1], got {ratio!r}.")
+        if isinstance(cell, bool) or not isinstance(cell, int) or cell < 1:
+            raise ValueError(f"MaskPeakGate: cell must be an integer >= 1, got {cell!r}.")
+        self.ratio = float(ratio)
+        self.cell = int(cell)
+        super().__init__(ratio=self.ratio, cell=self.cell, **kwargs)
+
+    def forward(
+        self, decisions: Tensor, reference: Tensor, scores: Tensor, **_: Any
+    ) -> dict[str, Tensor]:
+        """Return the blobs of ``decisions`` whose peak reaches ``ratio`` x their reference peak."""
+        ref = reference.any(dim=-1)
+        if ref.shape != decisions.shape[:3] or tuple(scores.shape[:3]) != tuple(
+            decisions.shape[:3]
+        ):
+            raise ValueError(
+                f"MaskPeakGate: reference {tuple(ref.shape)} / scores {tuple(scores.shape[:3])} do "
+                f"not match decisions [B, H, W] = {tuple(decisions.shape[:3])}."
+            )
+        if self.ratio == 0.0 or decisions.numel() == 0 or not bool(decisions.any()):
+            return {"decisions": decisions.clone()}
+        x = decisions.permute(0, 3, 1, 2)
+        s = scores[..., :1].permute(0, 3, 1, 2).to(torch.float32)
+        r = ref[:, None]
+        low = torch.full_like(s, float("-inf"))
+        peak = _cell_max(torch.where(x, s, low), self.cell)
+        ref_peak = _cell_max(torch.where(r, s, low), self.cell)
+        host = torch.cat([peak, ref_peak], dim=1).cpu().numpy()  # one copy to the host
+        keep = np.zeros(peak.shape, bool)
+        for i in range(keep.shape[0]):
+            rp = host[i, -1]
+            for c in range(keep.shape[1]):
+                occ = host[i, c] > -np.inf  # a cell holds a mark iff its maximum is finite
+                if occ.any():
+                    keep[i, c] = _peak_keep(occ, rp > -np.inf, host[i, c], rp, self.ratio)
+        kk = torch.from_numpy(keep).to(device=decisions.device).permute(0, 2, 3, 1)
+        return {"decisions": _expand_cells(kk, decisions, self.cell)}

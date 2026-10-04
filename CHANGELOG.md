@@ -41,7 +41,20 @@
   `MaskPersistence`: +1.5 to +2.7 ms per FO frame on an RTX 4070 laptop GPU, ~0 on clean frames;
   the four walnut_final_robust pipelines match an independent reimplementation on 32 real frames.
 
+- Added `MaskPeakGate`: keeps the blobs of a mask whose peak score reaches `ratio` (default 0.8)
+  times the peak of the reference blob they lie in (cell grid, lazy on empty masks). With
+  `SpectralObjectMask(threshold="otsu", fill=True, dilate_px=4)`, `DecisionFusion("all")` and
+  `MaskMinArea(100)` it cuts an anomaly mask to the objects (walnut FO: about 88 % less marked area
+  off FOs and shells, no FO lost on the labelled frames, 4 of 240 on a fast turntable, about +2 ms
+  per frame with marks).
+- Added `threshold="otsu"` (each frame's Otsu level of the angle map, clipped to
+  `otsu_floor_deg` / `otsu_ceiling_deg`), `fill` (closing + hole filling on the stride grid) and
+  `dilate_px` (the full-size mask grown) to `SpectralObjectMask`; defaults unchanged.
+
 ### Changed
+- `SpectralObjectMask` computes the angle with a matrix-vector product on the strided grid (no
+  copy) and grows by `dilate_px` on the stride grid when that is exact; `MaskMinArea` and
+  `MaskBlobGate` make one host copy per call.
 - `MaskMinArea` and `MaskBlobGate` label the blobs on a grid of `cell` x `cell` pixel cells
   (new hparam `cell`, default 4; `cell=1` labels every pixel): exact pixel counts, marks whose
   cells touch form one blob. 28 ms -> ~1 ms per walnut frame for the whole robust mask.
