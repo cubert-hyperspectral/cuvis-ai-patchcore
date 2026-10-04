@@ -50,6 +50,11 @@
 - Added `threshold="otsu"` (each frame's Otsu level of the angle map, clipped to
   `otsu_floor_deg` / `otsu_ceiling_deg`), `fill` (closing + hole filling on the stride grid) and
   `dilate_px` (the full-size mask grown) to `SpectralObjectMask`; defaults unchanged.
+- Added `invert` to `MaskBlobGate` (default `False`, unchanged): keeps the other blobs, those with
+  fewer than `min_px` pixels of the gating mask. With `min_px=1`, a mask before a cut as
+  `decisions` and the mask after it as `mask`, these are the marks the cut removed entirely; fused
+  back with `DecisionFusion("any")`, the cut trims marks but never deletes one whose cells touch no
+  kept piece.
 
 ### Changed
 - `SpectralObjectMask` computes the angle with a matrix-vector product on the strided grid (no

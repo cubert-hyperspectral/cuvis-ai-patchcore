@@ -6,7 +6,8 @@ the threshold in specks of a few dozen pixels. ``MaskMinArea`` keeps a blob only
 ``min_area`` pixels (8-connected), so the specks go and the objects stay. Use it after a gate's
 ``decisions`` and before the viewers of the mask; the frame-level alarm is not changed by it.
 ``MaskBlobGate`` keeps a blob only if it holds at least ``min_px`` pixels of a second mask, e.g. a
-``SpectralObjectMask``: an anomaly blob on the empty belt goes, one around an object stays.
+``SpectralObjectMask``: an anomaly blob on the empty belt goes, one around an object stays; with
+``invert`` it keeps the other blobs, e.g. the marks a cut removed entirely, to put them back.
 ``MaskPeakGate`` keeps a blob only if its highest score reaches ``ratio`` x the highest score of the
 reference blob it lies in: after an anomaly mask is cut to the objects (``DecisionFusion("all")``
 with a grown ``SpectralObjectMask``), the piece holding the mark's peak stays and halo pieces left
@@ -212,11 +213,13 @@ class MaskBlobGate(Node):
             dtype=torch.bool,
             shape=(-1, -1, -1, -1),
             description="Same shape as `decisions`: its 8-connected blobs that hold at least "
-            "`min_px` pixels of `mask`.",
+            "`min_px` pixels of `mask` (with `invert`: fewer than `min_px`).",
         ),
     }
 
-    def __init__(self, min_px: int = 16, cell: int = 4, **kwargs: Any) -> None:
+    def __init__(
+        self, min_px: int = 16, cell: int = 4, invert: bool = False, **kwargs: Any
+    ) -> None:
         """Create a blob gate.
 
         Parameters
@@ -225,28 +228,40 @@ class MaskBlobGate(Node):
             blob). With a SpectralObjectMask as the gate, a blob on the empty background goes and a
             blob around an object (its halo included) stays.
         cell : side of the cells the blobs are labelled on (default 4; ``1`` labels every pixel).
+        invert : keep the other blobs instead, those with fewer than ``min_px`` pixels of the
+            gating mask (default False). With ``min_px=1``, a mask before a cut as ``decisions`` and
+            the mask after it as ``mask``, these are the marks the cut removed entirely; fused with
+            the cut mask (``DecisionFusion("any")``) the cut trims marks but never deletes one.
         """
         if isinstance(min_px, bool) or not isinstance(min_px, int) or min_px < 0:
             raise ValueError(f"MaskBlobGate: min_px must be an integer >= 0, got {min_px!r}.")
         if isinstance(cell, bool) or not isinstance(cell, int) or cell < 1:
             raise ValueError(f"MaskBlobGate: cell must be an integer >= 1, got {cell!r}.")
+        if not isinstance(invert, bool):
+            raise ValueError(f"MaskBlobGate: invert must be a bool, got {invert!r}.")
         self.min_px = int(min_px)
         self.cell = int(cell)
-        super().__init__(min_px=self.min_px, cell=self.cell, **kwargs)
+        self.invert = invert
+        super().__init__(min_px=self.min_px, cell=self.cell, invert=self.invert, **kwargs)
 
     def forward(self, decisions: Tensor, mask: Tensor, **_: Any) -> dict[str, Tensor]:
-        """Return the blobs of ``decisions`` that overlap ``mask`` by at least ``min_px`` pixels."""
+        """Return the blobs of ``decisions`` that overlap ``mask`` by at least ``min_px`` pixels
+        (with ``invert``: by fewer)."""
         gate = mask.any(dim=-1)
         if gate.shape != decisions.shape[:3]:
             raise ValueError(
                 f"MaskBlobGate: mask is [B, H, W] = {tuple(gate.shape)}, decisions "
                 f"{tuple(decisions.shape[:3])}."
             )
-        if self.min_px == 0 or decisions.numel() == 0 or not bool(decisions.any()):
+        if decisions.numel() == 0 or not bool(decisions.any()):
             return {"decisions": decisions.clone()}
+        if self.min_px == 0:  # every blob passes
+            return {"decisions": torch.zeros_like(decisions) if self.invert else decisions.clone()}
         x = decisions.permute(0, 3, 1, 2)
         w = (x & gate[:, None]).to(torch.float32)
         out = _filter_blobs(x, w, float(self.min_px), self.cell)
+        if self.invert:  # each set pixel's cell lies in one blob, kept or not
+            out = x & ~out
         return {"decisions": out.permute(0, 2, 3, 1)}
 
 

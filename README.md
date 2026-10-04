@@ -322,6 +322,9 @@ cell grid of `MaskMinArea`) that hold at least `min_px` (default 16) pixels of `
 channel). With the object mask as `mask`, an anomaly blob on the empty background goes, one
 around an object (halo included) stays. A foreign object with the background's own spectrum is
 not an object to it.
+With `invert=True` it keeps the other blobs (fewer than `min_px` pixels of `mask`): with `min_px=1`,
+the mask before a cut as `decisions` and the mask after it as `mask`, the marks the cut removed
+entirely, to fuse back in (`DecisionFusion("any")`).
 
 ## MaskPeakGate and the pixel-level cut
 
@@ -350,6 +353,10 @@ On the walnut FO stand this removes about 88 % of the marked area off the FOs an
 all marks left on the empty belt (0.02-0.07 per frame remain), with no FO lost on the labelled 1-Oct
 frames (4 of 240 on a fast turntable); about +2 ms per frame with marks on an RTX 4070 laptop GPU
 (+1 ms without).
+**Not FO-safe for dark, thin objects:** on a production recording with loose walnut stems (2 Oct)
+the cut removes the stems' marks. A dark stem's spectrum differs from the belt's mostly in
+brightness, which the spectral angle ignores (8-11 deg on a few cells, below the frame's Otsu
+level), and a stem's mark that touches another kept mark is not brought back by the `invert` gate.
 
 ## MaskBlobFilter
 

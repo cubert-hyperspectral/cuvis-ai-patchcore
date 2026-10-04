@@ -283,7 +283,7 @@ capabilities:
       dtype: bool
       shape: [-1, -1, -1, -1]
       optional: false
-      description: 'Same shape as `decisions`: its 8-connected blobs that hold at least `min_px` pixels of `mask`.'
+      description: 'Same shape as `decisions`: its 8-connected blobs that hold at least `min_px` pixels of `mask` (with `invert`: fewer than `min_px`).'
   doc_summary: Keep the blobs of a boolean mask that hold enough pixels of a second (gating) mask.
 - class_name: cuvis_ai_patchcore.node.objectness.SpectralObjectMask
   category: transform
@@ -348,7 +348,7 @@ capabilities:
       dtype: float32
       shape: [-1, -1, -1, -1]
       optional: false
-      description: Score map [B, H, W, C''] the peaks are read from (the first channel), e.g. the anomaly map the mask was thresholded from; positive where marked.
+      description: Score map [B, H, W, C''] the peaks are read from (the first channel), e.g. the anomaly map the mask was thresholded from; finite and positive where marked.
   output_specs:
     decisions:
       dtype: bool

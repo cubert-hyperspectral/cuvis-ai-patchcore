@@ -201,6 +201,41 @@ def test_blob_gate_cell_grid_matches_the_scipy_cell_rule(k):
         assert np.array_equal(out[b, :, :, 0], _cell_reference(mm, mm & gg, k, 4)), b
 
 
+@pytest.mark.parametrize("k", [1, 3, 10])
+def test_blob_gate_invert_keeps_exactly_the_other_blobs(k):
+    gen = torch.Generator().manual_seed(200 + k)
+    m = torch.rand(2, H, W, 1, generator=gen) < 0.06
+    g = torch.rand(2, H, W, 1, generator=gen) < 0.3
+    kept = MaskBlobGate(min_px=k)(decisions=m, mask=g)["decisions"]
+    out = MaskBlobGate(min_px=k, invert=True)(decisions=m, mask=g)["decisions"]
+    assert torch.equal(out | kept, m) and not (out & kept).any()
+    for b in range(2):
+        mm, gg = m[b, :, :, 0].numpy(), g[b, :, :, 0].numpy()
+        assert np.array_equal(out[b, :, :, 0].numpy(), mm & ~_cell_reference(mm, mm & gg, k, 4)), b
+
+
+def test_blob_gate_invert_puts_back_the_marks_a_cut_removed():
+    before = torch.zeros(1, H, W, 1, dtype=torch.bool)
+    before[0, 1:6, 1:6, 0] = True  # trimmed by the cut: stays as cut
+    before[0, 12:18, 14:22, 0] = True  # removed by the cut: comes back whole
+    cut = before.clone()
+    cut[0, 1:6, 4:6, 0] = False
+    cut[0, 12:18, 14:22, 0] = False
+    back = MaskBlobGate(min_px=1, invert=True)(decisions=before, mask=cut)["decisions"]
+    exp = torch.zeros_like(before)
+    exp[0, 12:18, 14:22, 0] = True
+    assert torch.equal(back, exp)
+    assert torch.equal(back | cut, cut | exp)
+    # nothing left after the cut: every mark comes back; zero gate pixels needed: nothing passes
+    assert torch.equal(
+        MaskBlobGate(min_px=1, invert=True)(decisions=before, mask=torch.zeros_like(before))[
+            "decisions"
+        ],
+        before,
+    )
+    assert not MaskBlobGate(min_px=0, invert=True)(decisions=before, mask=cut)["decisions"].any()
+
+
 def test_blob_gate_zero_is_the_identity_and_shapes_are_checked():
     m = torch.rand(1, H, W, 1, generator=torch.Generator().manual_seed(1)) < 0.4
     g = torch.zeros(1, H, W, 1, dtype=torch.bool)
@@ -216,6 +251,9 @@ def test_blob_gate_port_contract_and_hparams():
     assert out["decisions"].dtype == torch.bool
     with pytest.raises(ValueError):
         MaskBlobGate(min_px=-1)
+    with pytest.raises(ValueError):
+        MaskBlobGate(invert=1)
     hp = MaskBlobGate(min_px=8, name="objgate").hparams
-    assert hp["min_px"] == 8
+    assert hp["min_px"] == 8 and hp["invert"] is False
+    assert MaskBlobGate(min_px=1, invert=True).hparams["invert"] is True
     json.dumps(hp)
