@@ -386,6 +386,14 @@ hparams: `min_area` (250), `min_object_px` (16; `0` skips the object test), `min
 FO marks it takes about 1 ms on an RTX 4070 laptop GPU, 0.1 ms on a clean frame; with
 `MaskPersistence` behind it the two walnut FO pipelines run +1.5 to +2.7 ms per FO frame.
 
+## Planned move of the generic nodes
+
+Every node here except `PatchCoreDetector` is a plain score or mask operation (fusion, gate, calibration, blob
+filters, persistence, spatial resampling). They are planned to move into cuvis-ai's built-in node library
+(cuvis-ai issues #105, #108, #109), where the overlapping built-in nodes are extended instead of duplicated. The class
+paths in this plugin stay listed in `plugins.yaml` for one minor-release window after that move, marked deprecated,
+so pipelines written against 0.3.0 keep loading; the next major release removes them.
+
 ## Install
 
 One manifest file is one plugin. For development, point it at a checkout (the path is relative to
