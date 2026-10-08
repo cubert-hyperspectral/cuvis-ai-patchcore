@@ -6,7 +6,7 @@ import pytest
 from cuvis_ai_core.data.model_weights import USED_FOR_LABELS, ModelWeights
 
 import cuvis_ai_patchcore  # noqa: F401  (registers the rows)
-from cuvis_ai_patchcore.weights import PLUGIN_NAME, WEIGHTS
+from cuvis_ai_patchcore.weights import _WALNUT_REPO, _WALNUT_REVISION, PLUGIN_NAME, WEIGHTS
 
 pytestmark = pytest.mark.unit
 
@@ -32,3 +32,8 @@ def test_names_are_unique_and_registered():
     assert len(set(names)) == len(names)
     registered = {row.name for row in ModelWeights.rows() if row.plugin == PLUGIN_NAME}
     assert set(names) <= registered
+
+
+def test_rows_share_the_published_repo_and_revision():
+    assert {row.repo_id for row in WEIGHTS} == {_WALNUT_REPO}
+    assert {row.revision for row in WEIGHTS} == {_WALNUT_REVISION}
