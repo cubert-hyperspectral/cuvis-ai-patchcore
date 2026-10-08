@@ -73,6 +73,8 @@
   `decisions` and the mask after it as `mask`, these are the marks the cut removed entirely; fused
   back with `DecisionFusion("any")`, the cut trims marks but never deletes one whose cells touch no
   kept piece.
+- `FrameScoreGate.reset()` forgets the `smooth_k` history (e.g. a new recording); a batch of
+  several frames with `smooth_k > 1` raises instead of sharing one rolling window.
 
 ### Changed
 - `SpectralObjectMask` computes the angle with a matrix-vector product on the strided grid (no

@@ -231,3 +231,18 @@ def test_log_scores_logs_the_display_maps_highest_pixel():
 def test_invalid_smoothing_and_mask_hparams_raise(kw):
     with pytest.raises(ValueError):
         FrameScoreGate(threshold=1.0, **kw)
+
+
+def test_smooth_k_refuses_a_batch_of_several_frames():
+    node = FrameScoreGate(threshold=1.0, topk_frac=1.0, smooth_k=3)
+    with pytest.raises(RuntimeError, match="one frame per forward"):
+        node(scores=_scores())  # two frames in one call would share one rolling window
+
+
+def test_reset_forgets_the_rolling_frame_scores():
+    node = FrameScoreGate(threshold=1.0, topk_frac=1.0, smooth_k=3)
+    for v in (0.1, 0.1):
+        node(scores=torch.full((1, 2, 2, 1), v))
+    assert int(node(scores=torch.full((1, 2, 2, 1), 5.0))["passed"]) == 0  # the median holds it
+    node.reset()
+    assert int(node(scores=torch.full((1, 2, 2, 1), 5.0))["passed"]) == 1  # a fresh window

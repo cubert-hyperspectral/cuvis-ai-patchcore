@@ -128,7 +128,8 @@ class FrameScoreGate(Node):
             highest pixel (``pmax``) at INFO (read the server log during a session to find the clean
             band of both thresholds). Off in production.
         smooth_k : gate on a rolling median of the last ``smooth_k`` frame scores (default 1 = no
-            smoothing). Runtime-only state (not serialized); assumes one frame per forward.
+            smoothing). Runtime-only state (not serialized); needs one frame per forward (a batch
+            of several frames raises); ``reset()`` forgets the history (e.g. a new recording).
         core_ratio : the ``core`` output marks the pixels above ``core_ratio`` x ``mask_threshold``
             on passing frames (default 1.0: the pixels of ``decisions``; must be >= 1, for a
             positive ``mask_threshold``). E.g. 1.3 keeps the confident part of a mark through a
@@ -170,6 +171,10 @@ class FrameScoreGate(Node):
             **kwargs,
         )
 
+    def reset(self) -> None:
+        """Forget the rolling frame scores of ``smooth_k`` (e.g. a new recording)."""
+        self._recent.clear()
+
     def forward(
         self, scores: Tensor, alarm_scores: Tensor | None = None, **_: Any
     ) -> dict[str, Tensor]:
@@ -182,6 +187,11 @@ class FrameScoreGate(Node):
         frame = topk_mean(src, self.topk_frac)  # [B] raw per-frame score
 
         if self.smooth_k > 1:
+            if scores.shape[0] != 1:
+                raise RuntimeError(
+                    f"smooth_k={self.smooth_k} needs one frame per forward, got a batch of "
+                    f"{scores.shape[0]}"
+                )
             smoothed = []
             for f in frame.tolist():
                 self._recent.append(float(f))
