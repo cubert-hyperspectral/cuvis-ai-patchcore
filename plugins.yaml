@@ -369,7 +369,7 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_refit/walnut_best_refit.pt
-  revision: '0000000000000000000000000000000000000000'
+  revision: defcb3991e841a89d72d36c88ca2df6557938d9c
   sha256: 8ef10835d72f58cdd2e7d4e09a53e2eed5955d45cbf0891e71c8243b09c17e3f
   size_bytes: 916906227
   aux_files:
@@ -386,7 +386,7 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_original/walnut_best_original.pt
-  revision: '0000000000000000000000000000000000000000'
+  revision: defcb3991e841a89d72d36c88ca2df6557938d9c
   sha256: 0b8812933b7585017afea2cf5558d3aa2aa6dbb1ce5e7044aa91e4c9b24062f5
   size_bytes: 916907738
   aux_files:
@@ -403,7 +403,7 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_refit_cut/walnut_best_refit_cut.pt
-  revision: '0000000000000000000000000000000000000000'
+  revision: defcb3991e841a89d72d36c88ca2df6557938d9c
   sha256: a1d3ef939263e9ee558cf810f86bb806053ac924dbe6662ca2bdc985f37dbc95
   size_bytes: 916908007
   aux_files:
@@ -420,7 +420,7 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_original_cut/walnut_best_original_cut.pt
-  revision: '0000000000000000000000000000000000000000'
+  revision: defcb3991e841a89d72d36c88ca2df6557938d9c
   sha256: 1966c03d2d0831bca1b195592bc4de86d6aed37f32a274bfa9b3e92a67fdb699
   size_bytes: 916909582
   aux_files:
@@ -437,7 +437,7 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_refit_shellaware/walnut_best_refit_shellaware.pt
-  revision: '0000000000000000000000000000000000000000'
+  revision: defcb3991e841a89d72d36c88ca2df6557938d9c
   sha256: 9283acf93e16de371e30a3ed9cf6e28c4c02410101669f3e92f6d1217d141ef0
   size_bytes: 916911298
   aux_files:
@@ -454,7 +454,7 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_original_shellaware/walnut_best_original_shellaware.pt
-  revision: '0000000000000000000000000000000000000000'
+  revision: defcb3991e841a89d72d36c88ca2df6557938d9c
   sha256: 6d32cadefa4d5f99cfaa00fca6ad8d9d3e866f9a65175cc1ab28446fa83775fa
   size_bytes: 916912809
   aux_files:

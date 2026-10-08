@@ -21,7 +21,7 @@ PLUGIN_NAME = "patchcore"
 """The manifest name of this plugin (what pipelines list under ``plugins:``)."""
 
 _WALNUT_REPO = "cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts"
-_WALNUT_REVISION = "0000000000000000000000000000000000000000"
+_WALNUT_REVISION = "defcb3991e841a89d72d36c88ca2df6557938d9c"
 """The published commit of the walnut model repository (40 hex digits)."""
 
 WEIGHTS: tuple[PluginWeightEntry, ...] = (
