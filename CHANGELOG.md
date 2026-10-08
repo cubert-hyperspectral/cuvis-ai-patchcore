@@ -2,6 +2,96 @@
 
 ## [Unreleased]
 
+## 0.3.0 - 2026-10-07
+
+### Added
+- Added a boolean `decisions` output to `FrameScoreGate`: the pixels of the display map above
+  `mask_threshold` (default `threshold`) on passing frames, all False on the others, as an object
+  mask a viewer can overlay. `mask_threshold` now also sets this mask in `heatmap` mode; the other
+  outputs are unchanged. On the walnut FO pipelines, a `mask_threshold` at the highest pixel of the
+  session's clean frames gives a mask whose area follows the object (fake shells IoU 0.50-0.74,
+  against 0.08-0.13 for a fixed top-0.5 % mask) and that stays empty on clean frames.
+- Added `DecisionFusion`: combines N boolean masks by `any`, `all` or `first` (per frame the first
+  mask with a set pixel, the mask of the map a `ScoreMapFusion(mode="first")` displays).
+- Added `MaskComposite`: merges N boolean masks into one label map (`mask`, int32) and one level
+  map (`scores`), e.g. shells = 1 and foreign objects = 2 in one view; where masks overlap the largest
+  label / level wins.
+- Added mode `softmin` to `ScoreMapFusion`: a soft minimum `-(1/beta) log(sum_i w_i exp(-beta x_i))`
+  with the sharpness `beta` (required) and optional weights, between the hard minimum (large `beta`)
+  and the mean (small `beta`). On the walnut FO data a soft minimum of the multi-scale SteerViT map
+  and a spectral mixture map keeps the objects both see and drops each one's private false alarms.
+- Added `invert` to `ScoreRangeNormalizer`: calibrates the negated map, for maps where higher means
+  more normal (a log-likelihood). The default (`False`) is unchanged.
+- Added `GridSubsample` (every `stride`-th pixel of a cube in both axes) and `ScoreUpsample` (a score
+  map resized to the height and width of a reference tensor, bilinear by default), to score a
+  per-pixel model on a coarse grid and bring its map back to full resolution.
+- Added `ScoreMapSuppression`: a score map scaled by `1 - weight` inside a boolean mask shrunk by
+  `erode_px` (defaults 1.0 / 4), e.g. an FO anomaly map inside a segmenter's shell mask, so that
+  the detector cannot alarm on walnut shells smeared by motion.
+- Added `MaskPersistence`: keeps a pixel of a boolean mask only if the previous frame's mask has a
+  set pixel within `radius_px` (default 40, square window); the first frame shows nothing. Behind
+  the walnut FO gate, real objects on the turntable stay in view while one-frame false blobs go
+  (labelled 1-Oct frames: false blobs per FO frame 0.47 -> 0.25 with the deployed banks, 0.17 ->
+  0.07 with the refit; each FO material shows on 1-4 fewer frames, mostly an object's first frame,
+  stems on 4-7 fewer). Runtime state only, nothing serialized.
+- Added `MaskMinArea`: drops the 8-connected blobs of a boolean mask below `min_area` pixels
+  (default 250). On the user-labelled walnut frames it halves the false FO blobs per FO frame
+  (0.475 -> 0.215 for the deployed banks, 0.170 -> 0.060 for the refit) and loses no FO object
+  (one stem frame of 73 for the refit); specks on the empty belt are 42 px (median), FO blobs 9050 px.
+- Added `ScoreMapSmoothing`: a score map convolved with a Gaussian of `sigma_px` (default 8,
+  separable, mirrored border), PatchCore's own post-processing, before the gate. With the 1-Oct
+  refit banks on the user's labels (sigma 8 + MaskMinArea 250): fake shells shown 106 -> 154 of
+  182, stems 60 -> 69 of 73, false blobs per FO frame 0.170 -> 0.090.
+- Added `SpectralObjectMask` (the pixels whose spectral angle to the frame's median spectrum
+  exceeds `min_angle_deg`, default 6, on a stride-4 grid) and `MaskBlobGate` (the blobs of a
+  mask that hold at least `min_px` pixels of a second mask): together a class-agnostic object
+  gate for an anomaly mask. On the user-labelled walnut frames no FO object is lost and the false
+  blobs per FO frame drop 0.475 -> 0.305 (deployed banks; 0.170 with MaskMinArea 250); on a
+  recording with a wrong white reference the marks on the empty belt drop from 10.6 per frame to 0.
+- Added `MaskBlobFilter`: `MaskMinArea`, `SpectralObjectMask` and `MaskBlobGate` in one pass (one
+  labelling, both tests per blob, nothing done on an empty mask, the spectral angle on the cell
+  grid without a GPU sync), identical to the chain. Behind the walnut FO gate with
+  `MaskPersistence`: +1.5 to +2.7 ms per FO frame on an RTX 4070 laptop GPU, ~0 on clean frames;
+  the four walnut_final_robust pipelines match an independent reimplementation on 32 real frames.
+
+- Added `MaskPeakGate`: keeps the blobs of a mask whose peak score reaches `ratio` (default 0.8)
+  times the peak of the reference blob they lie in (cell grid, lazy on empty masks). With
+  `SpectralObjectMask(threshold="otsu", fill=True, dilate_px=4)`, `DecisionFusion("all")` and
+  `MaskMinArea(100)` it cuts an anomaly mask to the objects (walnut FO: about 88 % less marked area
+  off FOs and shells, no FO lost on the labelled frames, 4 of 240 on a fast turntable, about +2 ms
+  per frame with marks).
+- Added `threshold="otsu"` (each frame's Otsu level of the angle map, clipped to
+  `otsu_floor_deg` / `otsu_ceiling_deg`), `fill` (closing + hole filling on the stride grid) and
+  `dilate_px` (the full-size mask grown) to `SpectralObjectMask`; defaults unchanged.
+- Added `core_ratio` (default 1.0) and the output `core` to `FrameScoreGate`: the pixels above
+  `core_ratio` x `mask_threshold` on passing frames, the confident core of the mask, to fuse back in
+  after a cut of the mask (it follows `mask_threshold` when that is recalibrated). With the walnut
+  FO cut at 1.3 the loose stems of the 2 Oct production recording keep their marks (marks removed
+  that the uncut mask shows: 74 -> 8, none on a stem).
+- Added `invert` to `MaskBlobGate` (default `False`, unchanged): keeps the other blobs, those with
+  fewer than `min_px` pixels of the gating mask. With `min_px=1`, a mask before a cut as
+  `decisions` and the mask after it as `mask`, these are the marks the cut removed entirely; fused
+  back with `DecisionFusion("any")`, the cut trims marks but never deletes one whose cells touch no
+  kept piece.
+- `FrameScoreGate.reset()` forgets the `smooth_k` history (e.g. a new recording); a batch of
+  several frames with `smooth_k > 1` raises instead of sharing one rolling window.
+
+### Changed
+- `SpectralObjectMask` computes the angle with a matrix-vector product on the strided grid (no
+  copy) and grows by `dilate_px` on the stride grid when that is exact; `MaskMinArea` and
+  `MaskBlobGate` make one host copy per call.
+- `MaskMinArea` and `MaskBlobGate` label the blobs on a grid of `cell` x `cell` pixel cells
+  (new hparam `cell`, default 4; `cell=1` labels every pixel): exact pixel counts, marks whose
+  cells touch form one blob. 28 ms -> ~1 ms per walnut frame for the whole robust mask.
+- `SpectralObjectMask` takes the median over every `median_stride`-th pixel (new hparam, default 8)
+  along the contiguous axis (4x faster on a GPU).
+- `MaskPersistence` returns at once when this frame or the one before is empty, keeps the
+  previous frame's emptiness (one GPU sync per frame instead of two) and sums the integral image
+  in int32 (2x faster than the int64 default).
+- `FrameScoreGate(log_scores=True)` also logs `pmax`, the display map's highest pixel per frame (the
+  map `mask_threshold` cuts), so a live session's log alone is enough to set both thresholds from
+  clean frames.
+
 ## 0.2.0 - 2026-09-28
 
 ### Added

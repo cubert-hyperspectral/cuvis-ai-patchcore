@@ -119,6 +119,27 @@ def test_state_dict_round_trip_marks_node_fitted():
     assert torch.equal(fresh(scores=x)["normalized"], fitted(scores=x)["normalized"])
 
 
+def test_invert_equals_normalising_the_negated_map():
+    """invert=True on a log-likelihood-like map == the default node on the negated map."""
+    loglik = [{"scores": -b["scores"]} for b in _stream(seed=3)]
+    inv = ScoreRangeNormalizer(fit_subsample=2, invert=True)
+    inv.statistical_initialization(iter(loglik))
+    ref = ScoreRangeNormalizer(fit_subsample=2)
+    ref.statistical_initialization(iter([{"scores": -b["scores"]} for b in loglik]))
+    assert torch.equal(inv.lo, ref.lo) and torch.equal(inv.hi, ref.hi)
+    x = -_stream(1, seed=11)[0]["scores"]
+    assert torch.equal(inv(scores=x)["normalized"], ref(scores=-x)["normalized"])
+    # higher log-likelihood (more normal) -> lower output
+    assert inv(scores=x + 1.0)["normalized"].mean() < inv(scores=x)["normalized"].mean()
+
+
+def test_invert_hparam_defaults_to_false_and_round_trips():
+    assert ScoreRangeNormalizer().hparams["invert"] is False
+    hp = ScoreRangeNormalizer(invert=True, name="cal").hparams
+    assert hp["invert"] is True
+    json.dumps(hp)
+
+
 def test_hparams_json_round_trip():
     node = ScoreRangeNormalizer(
         n_channels=1, low=2, high=98, floor=False, fit_subsample=3, name="cal"

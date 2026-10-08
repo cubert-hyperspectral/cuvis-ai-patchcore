@@ -1,4 +1,4 @@
-"""FrameScoreGate: gating logic, frame score, mask mode, port contract, hparam validation."""
+"""FrameScoreGate: gating, frame score, mask mode, decisions mask, port contract, hparams."""
 
 from __future__ import annotations
 
@@ -77,6 +77,81 @@ def test_port_contract():
     assert out["scores"].shape == (3, 8, 8, 1) and out["scores"].dtype == torch.float32
     assert out["frame_score"].shape == (3,) and out["frame_score"].dtype == torch.float32
     assert out["passed"].shape == (3,) and out["passed"].dtype == torch.int32
+    assert out["decisions"].shape == (3, 8, 8, 1) and out["decisions"].dtype == torch.bool
+    assert out["core"].shape == (3, 8, 8, 1) and out["core"].dtype == torch.bool
+    assert set(out) == set(FrameScoreGate.OUTPUT_SPECS)
+
+
+def test_decisions_mask_the_passing_frames_only():
+    node = FrameScoreGate(threshold=1.0, topk_frac=0.25)
+    out = node(scores=_scores())
+    assert not out["decisions"][0].any()  # clean frame: no mask
+    assert torch.equal(out["decisions"][1], _scores()[1] > 1.0)  # the 4 hot pixels
+    assert int(out["decisions"][1].sum()) == 4
+
+
+def test_decisions_use_mask_threshold_on_the_display_scale():
+    # The alarm map fires; the display map is on its own scale and masked at mask_threshold.
+    display = torch.full((1, 4, 4, 1), 0.2, dtype=torch.float32)
+    display[0, 1, :2, 0] = 0.8  # 2 pixels above 0.5
+    alarm = torch.full((1, 4, 4, 1), 5.0, dtype=torch.float32)
+    node = FrameScoreGate(threshold=1.0, topk_frac=0.25, mask_threshold=0.5)
+    out = node(scores=display, alarm_scores=alarm)
+    assert int(out["decisions"].sum()) == 2
+    assert torch.equal(out["scores"], display)  # heatmap mode still shows the display map
+
+
+def test_decisions_equal_the_binary_scores_of_mask_mode():
+    for mask_threshold in (None, 0.05):
+        node = FrameScoreGate(
+            threshold=1.0, topk_frac=0.25, mode="mask", mask_threshold=mask_threshold
+        )
+        out = node(scores=_scores())
+        assert torch.equal(out["scores"], out["decisions"].to(torch.float32))
+
+
+def test_decisions_area_follows_the_object():
+    # An absolute mask_threshold marks every hot pixel of a passing frame, however many there are.
+    x = torch.full((2, 8, 8, 1), 0.1, dtype=torch.float32)
+    x[0, 0, 0, 0] = 5.0  # small object: 1 px
+    x[1, :4, :4, 0] = 5.0  # large object: 16 px
+    node = FrameScoreGate(threshold=1.0, topk_frac=1 / 64, mask_threshold=1.0)
+    out = node(scores=x)
+    assert out["decisions"].flatten(1).sum(1).tolist() == [1, 16]
+
+
+def test_decisions_follow_the_smoothed_gate():
+    node = FrameScoreGate(threshold=1.0, topk_frac=1.0, smooth_k=3)
+    masked = []
+    for v in (0.1, 0.1, 5.0, 5.0):  # the isolated spike stays closed; the sustained one opens
+        masked.append(bool(node(scores=torch.full((1, 2, 2, 1), v))["decisions"].any()))
+    assert masked == [False, False, False, True]
+
+
+def test_core_is_the_confident_part_of_the_mask():
+    x = torch.full((2, 4, 4, 1), 0.1, dtype=torch.float32)
+    x[:, 0, :, 0] = torch.tensor([1.2, 1.4, 2.0, 5.0])  # both frames: hot row
+    alarm = torch.full((2, 4, 4, 1), 0.1, dtype=torch.float32)
+    alarm[1] = 5.0  # only frame 1 passes
+    node = FrameScoreGate(threshold=1.0, topk_frac=0.25, mask_threshold=1.0, core_ratio=1.3)
+    out = node(scores=x, alarm_scores=alarm)
+    assert not out["core"][0].any() and not out["decisions"][0].any()  # blank frame: no core
+    assert torch.equal(out["core"][1], x[1] > 1.3)  # 3 pixels: 1.4, 2.0, 5.0
+    assert int(out["core"][1].sum()) == 3 and int(out["decisions"][1].sum()) == 4
+    assert not (out["core"] & ~out["decisions"]).any()  # a subset of the mask
+    assert node.hparams["core_ratio"] == 1.3
+
+
+def test_core_defaults_to_the_decisions():
+    out = FrameScoreGate(threshold=1.0, topk_frac=0.25)(scores=_scores())
+    assert torch.equal(out["core"], out["decisions"])
+    assert FrameScoreGate(threshold=1.0).hparams["core_ratio"] == 1.0
+
+
+@pytest.mark.parametrize("kw", [{"core_ratio": 0.9}, {"core_ratio": True}, {"core_ratio": "1.3"}])
+def test_invalid_core_ratio_raises(kw):
+    with pytest.raises(ValueError):
+        FrameScoreGate(threshold=1.0, **kw)
 
 
 @pytest.mark.parametrize(
@@ -127,7 +202,47 @@ def test_log_scores_logs_every_frame_decision():
     assert "[gate] frame_score=5.0000 threshold=1.0000 passed=1" in lines[1]
 
 
+def test_log_scores_logs_the_display_maps_highest_pixel():
+    """pmax = the displayed map's peak (what mask_threshold cuts), not the alarm map's."""
+    from loguru import logger
+
+    shown = torch.full((2, 4, 4, 1), 0.1, dtype=torch.float32)
+    shown[0, 1, 2, 0] = 9.0  # one hot pixel: top-4 mean 2.325, peak 9.0
+    alarm = torch.full((2, 4, 4, 1), 0.2, dtype=torch.float32)
+    alarm[1, 3, 3, 0] = 7.0
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="INFO", format="{message}")
+    try:
+        kw = {"threshold": 1.0, "topk_frac": 0.25, "log_scores": True}
+        FrameScoreGate(**kw, name="g")(scores=shown)
+        FrameScoreGate(**kw, name="g2")(scores=shown, alarm_scores=alarm)
+    finally:
+        logger.remove(sink)
+    msgs = [m.rstrip() for m in lines]
+    assert msgs == [
+        "[g] frame_score=2.3250 threshold=1.0000 passed=1 pmax=9.0000",
+        "[g] frame_score=0.1000 threshold=1.0000 passed=0 pmax=0.1000",
+        "[g2] frame_score=0.2000 threshold=1.0000 passed=0 pmax=9.0000",  # alarms on alarm_scores
+        "[g2] frame_score=1.9000 threshold=1.0000 passed=1 pmax=0.1000",
+    ]
+
+
 @pytest.mark.parametrize("kw", [{"smooth_k": 0}, {"smooth_k": 2.5}, {"mask_threshold": "x"}])
 def test_invalid_smoothing_and_mask_hparams_raise(kw):
     with pytest.raises(ValueError):
         FrameScoreGate(threshold=1.0, **kw)
+
+
+def test_smooth_k_refuses_a_batch_of_several_frames():
+    node = FrameScoreGate(threshold=1.0, topk_frac=1.0, smooth_k=3)
+    with pytest.raises(RuntimeError, match="one frame per forward"):
+        node(scores=_scores())  # two frames in one call would share one rolling window
+
+
+def test_reset_forgets_the_rolling_frame_scores():
+    node = FrameScoreGate(threshold=1.0, topk_frac=1.0, smooth_k=3)
+    for v in (0.1, 0.1):
+        node(scores=torch.full((1, 2, 2, 1), v))
+    assert int(node(scores=torch.full((1, 2, 2, 1), 5.0))["passed"]) == 0  # the median holds it
+    node.reset()
+    assert int(node(scores=torch.full((1, 2, 2, 1), 5.0))["passed"]) == 1  # a fresh window

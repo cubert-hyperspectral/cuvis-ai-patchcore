@@ -12,14 +12,26 @@ one covariance, the memory bank keeps one entry per normal spectral mode, so in-
 mixtures stop firing while out-of-distribution spectra (foreign objects, unknown materials) stay far
 from every entry.
 
-The plugin ships four nodes:
+The plugin ships fourteen nodes:
 
 | Node | Role |
 |---|---|
 | [`PatchCoreDetector`](#patchcoredetector) | memory-bank detector on spectra or any dense feature grid (Phase-1 fitted) |
 | [`ScoreRangeNormalizer`](#scorerangenormalizer) | puts one detector's map on its normal range before fusion (Phase-1 fitted) |
-| [`ScoreMapFusion`](#scoremapfusion) | fuses N maps: mean, min, max, weighted mean, or a priority rule for gated maps |
-| [`FrameScoreGate`](#framescoregate) | blanks a map on frames whose top-k score stays at or below a threshold |
+| [`ScoreMapFusion`](#scoremapfusion) | fuses N maps: mean, min, max, weighted mean, soft minimum, or a priority rule for gated maps |
+| [`FrameScoreGate`](#framescoregate) | blanks a map on frames whose top-k score stays at or below a threshold; emits the object mask |
+| [`DecisionFusion`](#decisionfusion) | fuses N boolean masks: any, all, or the priority rule of `ScoreMapFusion` |
+| [`MaskComposite`](#maskcomposite) | merges N boolean masks into one label map and one level map for display |
+| [`GridSubsample`](#gridsubsample-and-scoreupsample) | every `stride`-th pixel of a cube, to score a per-pixel model on a coarse grid |
+| [`ScoreUpsample`](#gridsubsample-and-scoreupsample) | resizes a grid's score map to the height and width of a reference tensor |
+| [`ScoreMapSuppression`](#scoremapsuppression) | down-weights a score map inside a boolean mask shrunk by a margin (e.g. a segmenter's mask of objects that cannot be anomalous) |
+| [`MaskPersistence`](#maskpersistence) | keeps a mask pixel only where the previous frame's mask lies within a radius, so one-frame flickers never show |
+| [`MaskMinArea`](#maskminarea) | drops the blobs of a mask below a pixel count, e.g. specks on an empty background |
+| [`ScoreMapSmoothing`](#scoremapsmoothing) | Gaussian smoothing of a score map (PatchCore's post-processing) |
+| [`SpectralObjectMask`](#spectralobjectmask-and-maskblobgate) | marks the pixels that are not the background material (spectral angle to the frame's median) |
+| [`MaskBlobGate`](#spectralobjectmask-and-maskblobgate) | keeps the blobs of a mask that hold enough pixels of a second mask (e.g. objects) |
+| [`MaskBlobFilter`](#maskblobfilter) | MaskMinArea + SpectralObjectMask + MaskBlobGate in one lazy pass, for a live pipeline |
+| [`MaskPeakGate`](#maskpeakgate-and-the-pixel-level-cut) | keeps the blobs of a mask whose peak score reaches a share of the peak of their reference blob |
 
 Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.11 – 3.13.
 
@@ -96,7 +108,10 @@ percentile range (saturates every anomaly on a drifted session).
 | `normalized` | out | `[B, H, W, C]` float32, `>= 0`, unbounded above |
 
 hparams: `n_channels` 1 · `low` 1.0 · `high` 99.0 · `floor` true · `fit_subsample` 4 (spatial stride
-of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 0 · `eps` 1e-9.
+of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 0 · `eps` 1e-9 ·
+`invert` false. With `invert: true` the node calibrates `-x` (fit and inference), for maps where
+higher means more normal, e.g. a Gaussian mixture's log-likelihood; the output is then an anomaly
+score on the same normal-range scale as the other detectors.
 
 ## ScoreMapFusion
 
@@ -108,11 +123,17 @@ of the Phase-1 collection) · `max_fit_values` 4 000 000 (seeded cap) · `seed` 
 | `scores` | out | `[B, H, W, 1]` float32 | fused map |
 
 `mode`: `mean` (default) · `min` (AND) · `max` (OR) · `wmean` with `weights` (one per map,
-normalised to sum to one) · `first`: per frame, the first inbound map (in connection order) that is
-not all zero. `first` is for gated maps: connect the preferred detector's gated map first, and a
-second detector's map shows only on frames the first gate blanks. Feed the other modes maps on a
-common scale — a fitted normalizer per detector — otherwise the detector with the widest range
-dominates. Stateless and differentiable.
+normalised to sum to one) · `softmin` with `beta` (required) and optional `weights`: the soft minimum
+`-(1/beta) log(sum_i w_i exp(-beta x_i))`, a soft AND between the minimum (large `beta`; at most
+`log(N) / beta` above it with equal weights) and the mean (small `beta`) · `first`: per frame, the
+first inbound map (in connection order) that is not all zero. `first` is for gated maps: connect the
+preferred detector's gated map first, and a second detector's map shows only on frames the first
+gate blanks. Feed the other modes maps on a common scale — a fitted normalizer per detector —
+otherwise the detector with the widest range dominates. Stateless and differentiable.
+
+Order-dependent rules (`first`, weighted `wmean` / `softmin`): `save_to_file` writes a fan-in's
+connections in the order their source nodes entered the pipeline graph, and a reloaded pipeline uses
+that order. Add the source nodes in the intended order (or check the saved yaml).
 
 A complete two-bank pipeline (raw-spectra bank + SteerViT-feature bank, each calibrated by
 `ScoreRangeNormalizer`, fused by `ScoreMapFusion`) and its Phase-1 trainrun ship with
@@ -135,17 +156,243 @@ fusion map.
 | `scores` | out | `[B, H, W, C]` float32 | display map (or its `mask_threshold` binary mask) on passing frames, zeros otherwise |
 | `frame_score` | out | `[B]` float32 | raw per-frame alarm score |
 | `passed` | out | `[B]` int32 | 1 when the (smoothed) score > `threshold` |
+| `decisions` | out | `[B, H, W, C]` bool | object mask: display-map pixels above `mask_threshold` on passing frames, all False otherwise |
+| `core` | out | `[B, H, W, C]` bool | the confident core of the mask: pixels above `core_ratio` x `mask_threshold` on passing frames (= `decisions` by default) |
 
 hparams: `threshold` (required; set above the session's clean band) · `topk_frac` 0.001 · `mode`
-`heatmap` | `mask` · `mask_threshold` (default `threshold`) · `log_scores` false (log every frame
-decision at INFO, for calibrating on a live session) · `smooth_k` 1 (> 1: gate on the rolling median
-of the last k frame scores; runtime state, one frame per forward). Stateless otherwise: the
-threshold is a hyper-parameter, not a fitted buffer, because the operating point drifts with the
-session.
+`heatmap` | `mask` · `mask_threshold` (default `threshold`; the cutoff of `decisions`, and of
+`scores` in `mask` mode) · `log_scores` false (log every frame decision and the display map's
+highest pixel `pmax` at INFO, for calibrating both thresholds on a live session) · `smooth_k` 1 (> 1: gate on the rolling median of the last k frame scores; runtime
+state, one frame per forward) · `core_ratio` 1.0 (>= 1; the cutoff of `core` relative to
+`mask_threshold`, so it follows a recalibration). Stateless otherwise: the thresholds are hyper-parameters, not fitted
+buffers, because the operating point drifts with the session.
+
+**Object mask.** Set `mask_threshold` on the display map's own scale, e.g. to the highest pixel of
+the session's clean frames. The mask then marks the pixels above anything a clean frame produced:
+its area follows the object, and it stays empty on clean frames even if the gate is bypassed. A
+per-frame quantile (the top q of the pixels) marks the same area on every frame instead, too small
+for a large object and spread over texture on a small one. `decisions` is a port name that viewers
+such as cuvis.next overlay as a mask.
 
 Two gates fused by `ScoreMapFusion(mode="first")` make an OR alarm with a priority display: each
 gate alarms on its own detector, and the output shows the first detector's map whenever its gate
-opens, the second detector's map only on frames the first gate misses.
+opens, the second detector's map only on frames the first gate misses. Their `decisions` fused by
+`DecisionFusion(mode="first")` give the mask of the displayed map.
+
+**Core.** A step that cuts the mask afterwards (e.g. to the objects of a frame) can fuse `core` back
+in (`DecisionFusion("any")`), so a clear detection always stays shown. The walnut FO cut uses
+`core_ratio` 1.3: loose stems, marked at 1.5-1.7 x the mask threshold but not seen as objects by
+the spectral angle, keep their mark.
+
+## DecisionFusion
+
+`cuvis_ai_patchcore.node.fusion.DecisionFusion` — fuse N boolean masks into one.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in, variadic | `[B, H, W, C]` bool | one inbound connection per mask; all masks share one shape |
+| `decisions` | out | `[B, H, W, C]` bool | fused mask |
+
+`mode`: `any` (default, pixel-wise OR) · `all` (pixel-wise AND) · `first`: per frame, the first
+inbound mask (in connection order) with a set pixel, all False when none has one. Stateless.
+
+## MaskComposite
+
+`cuvis_ai_patchcore.node.fusion.MaskComposite` — merge N boolean masks into one output, e.g. the
+shells of a segmentation and the object mask of an anomaly gate in one view.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in, variadic | `[B, H, W, C]` bool | one inbound connection per mask, in the order of `labels` / `levels`; one B, H, W |
+| `mask` | out | `[B, H, W]` int32 | label map: 0 where no mask is set, else the largest label among the masks set there |
+| `scores` | out | `[B, H, W, 1]` float32 | level map: 0 where no mask is set, else the largest level among the masks set there |
+
+`labels` (default `[1, 2]`, integers >= 1) and `levels` (default `[0.5, 1.0]`, finite, >= 0): one
+per mask. Where masks overlap the largest entry wins, so the mask that should stay on top gets the
+largest one. A mask with several channels counts where any channel is set. Stateless.
+
+Viewers show a `mask` port as a label mask and a `scores` port as a heatmap. A port another node
+consumes is not a terminal output any more, so a pipeline that also wants the single masks shown
+adds a copy of them, e.g. `DecisionFusion` over one mask.
+
+## GridSubsample and ScoreUpsample
+
+`cuvis_ai_patchcore.node.spatial.GridSubsample` / `ScoreUpsample` — score a per-pixel model on a
+coarse grid of the cube and bring its map back to full resolution. A per-pixel spectral model costs
+the same for every pixel, so on a 1000 x 1080 cube a stride-4 grid is 16 x cheaper.
+
+| Node | Port | Direction | Shape / dtype |
+|---|---|---|---|
+| `GridSubsample` | `cube` | in | `[B, H, W, C]` float32 |
+| | `cube` | out | `[B, ceil(H / stride), ceil(W / stride), C]` = `cube[:, ::stride, ::stride, :]` |
+| `ScoreUpsample` | `scores` | in | `[B, h, w, C]` float32 (the grid's map) |
+| | `reference` | in | any `[B, H, W, *]` float32 of the target size (e.g. the cube) |
+| | `scores` | out | `[B, H, W, C]` float32, `align_corners=False` |
+
+hparams: `GridSubsample` — `stride` 4 · `ScoreUpsample` — `mode` `bilinear` (or `bicubic`,
+`nearest`). Both are stateless and differentiable. A spectral branch, e.g. the builtin
+`SNVCorrection` and `GaussianMixtureClusterer` on the grid, then `ScoreUpsample`, then
+`ScoreRangeNormalizer(invert=true)` on the log-likelihood, gives a map that `ScoreMapFusion`
+(`softmin`) can fuse with an image model's map.
+
+## ScoreMapSuppression
+
+`cuvis_ai_patchcore.node.fusion.ScoreMapSuppression` — down-weight a score map inside a boolean
+mask, e.g. an anomaly map inside a segmenter's mask of an object class that cannot be anomalous
+(walnut shells), placed before the gate so that neither the frame score nor the object mask can
+come from those objects.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `scores` | in | `[B, H, W, 1]` float32 | e.g. a fused anomaly map |
+| `mask` | in | `[B, H, W, C]` bool | same B, H, W; a pixel counts where any channel is set |
+| `scores` | out | `[B, H, W, 1]` float32 | `scores x (1 - weight x the eroded mask)` |
+
+hparams: `weight` (default 1.0, in `[0, 1]`: the share of the score removed inside the mask) ·
+`erode_px` (default 4, >= 0): the mask is first shrunk by a square erosion of this many pixels, so
+an object touching a masked one keeps its score along the shared edge; the image border does not
+shrink the mask. Stateless, differentiable in `scores`.
+
+## MaskPersistence
+
+`cuvis_ai_patchcore.node.temporal.MaskPersistence` — a frame-to-frame filter for the object mask
+of a moving scene (a turntable, a belt): a pixel of the current mask is kept only if the previous
+frame's mask has a set pixel within `radius_px` of it. A real object stays in view and moves a
+bounded distance per frame, so it shows from its second frame on; a blob that lives for one frame
+(sensor noise, motion blur) never shows. Placed after a `FrameScoreGate`'s `decisions`, before
+the viewers of the mask.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | consecutive frames, batch order = time order |
+| `decisions` | out | `[B, H, W, C]` bool | the pixels with a previous-frame pixel (same channel) within `radius_px`; none on the first frame |
+
+hparams: `radius_px` (default 40, >= 0): half the side of the square window, at least the
+largest distance an object moves between two frames. Runtime state only (the last frame's input
+mask, not serialized): the first frame after loading, after `reset()` or after a change of mask
+shape or device shows nothing. Not differentiable (boolean masks).
+
+## MaskMinArea
+
+`cuvis_ai_patchcore.node.morphology.MaskMinArea` — drop the blobs of a boolean mask that have
+fewer than `min_area` pixels. A real object's blob is the object plus the score map's halo; specks
+from texture or noise on an empty background are a few dozen pixels. Placed after a
+`FrameScoreGate`'s `decisions`, before the viewers of the mask (the alarm is unchanged).
+
+The blobs are labelled on a grid of `cell` x `cell` pixel cells (default 4): the marked pixels per
+cell are summed on the GPU and only the small cell grid is labelled (8-connected, OpenCV on the
+CPU). Areas are exact pixel counts; the one difference to labelling every pixel is that marks
+whose cells touch form one blob (gaps of up to `2 * cell - 1` pixels). `cell=1` labels every pixel.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | each frame and channel on its own |
+| `decisions` | out | `[B, H, W, C]` bool | the blobs with at least `min_area` pixels |
+
+hparams: `min_area` (default 250, >= 0; `0` / `1` keep everything), `cell` (default 4, >= 1).
+Stateless, not differentiable (boolean masks); an empty mask is returned without work.
+
+## ScoreMapSmoothing
+
+`cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing` — convolve a score map with a normalised
+Gaussian of `sigma_px` pixels (separable, radius round(4 sigma), mirrored border as OpenCV's
+BORDER_REFLECT_101). Isolated one-patch peaks drop, regions several patches agree on keep
+their level. Placed before a `FrameScoreGate`, so the alarm and the mask both see the smoothed
+map (calibrate the gate on the smoothed map).
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `scores` | in | `[B, H, W, C]` float32 | e.g. a fused anomaly map |
+| `scores` | out | `[B, H, W, C]` float32 | each channel smoothed |
+
+hparams: `sigma_px` (default 8.0, >= 0; `0` passes the map through). Stateless (the kernel is
+not saved), torch-native, differentiable.
+
+## SpectralObjectMask and MaskBlobGate
+
+`cuvis_ai_patchcore.node.objectness.SpectralObjectMask` marks a pixel as an object where its
+spectral angle to the frame's median spectrum (the background's, when it covers most of the
+frame) exceeds `min_angle_deg` (default 6.0), computed on every `stride`-th pixel (default 4) and
+expanded by nearest neighbour; the median runs over every `median_stride`-th pixel (default 8).
+Brightness-invariant (shadows stay background) and relative to the same frame (a white-reference
+error shifts background and objects alike); class-agnostic (any material that differs from the
+background is an object, known or not). Outputs `decisions` `[B, H, W, 1]` bool and `angle`
+`[B, H/s, W/s, 1]` float32. Options (defaults keep the fixed threshold):
+- `threshold="otsu"`: each frame's Otsu level of the angle map (0.1 deg steps, OpenCV), clipped
+  to `[otsu_floor_deg, otsu_ceiling_deg]` (default 3 / 12), instead of `min_angle_deg`;
+- `fill=True`: closes 1-cell gaps (3 x 3) and fills the holes of the objects on the stride grid;
+- `dilate_px`: grows the full-size mask by that many pixels (a margin around each object; on the
+  stride grid when it is a multiple of `stride`, exact).
+
+`cuvis_ai_patchcore.node.morphology.MaskBlobGate` keeps the blobs of `decisions` (labelled on the
+cell grid of `MaskMinArea`) that hold at least `min_px` (default 16) pixels of `mask` (any
+channel). With the object mask as `mask`, an anomaly blob on the empty background goes, one
+around an object (halo included) stays. A foreign object with the background's own spectrum is
+not an object to it.
+With `invert=True` it keeps the other blobs (fewer than `min_px` pixels of `mask`): with `min_px=1`,
+the mask before a cut as `decisions` and the mask after it as `mask`, the marks the cut removed
+entirely, to fuse back in (`DecisionFusion("any")`).
+
+## MaskPeakGate and the pixel-level cut
+
+`cuvis_ai_patchcore.node.morphology.MaskPeakGate` keeps the blobs of `decisions` (on the cell grid
+of `MaskMinArea`) whose highest `scores` value reaches `ratio` (default 0.8) times the highest score
+of the `reference` blob they lie in; a blob outside every reference blob stays.
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | e.g. the pieces of an anomaly mask after a cut |
+| `reference` | in | `[B, H, W, C']` bool | e.g. the mask before the cut (any channel counts) |
+| `scores` | in | `[B, H, W, C'']` float32 | the map the mask was thresholded from (first channel), finite where marked |
+| `decisions` | out | `[B, H, W, C]` bool | the blobs that reach `ratio` x their reference peak |
+
+hparams: `ratio` (0.8, in [0, 1]; `0` keeps everything), `cell` (4). Stateless, not
+differentiable; an empty mask is returned without work.
+
+The pixel-level cut of an anomaly mask to the objects, four nodes after the gate (walnut FO,
+`walnut_final_robust_v2/*_cut`):
+1. `SpectralObjectMask(threshold="otsu", otsu_floor_deg=2, fill=True, dilate_px=4)`: the objects plus 4 px;
+2. `DecisionFusion(mode="all")`: the mask AND the objects;
+3. `MaskMinArea(min_area=100)`: leftover pieces under 100 px go;
+4. `MaskPeakGate(ratio=0.8)` with the uncut mask as `reference` and the gate's input map as `scores`:
+   halo pieces left on neighbouring objects, far below the mark's peak, go.
+On the walnut FO stand this removes about 88 % of the marked area off the FOs and shells and nearly
+all marks left on the empty belt (0.02-0.07 per frame remain), with no FO lost on the labelled 1-Oct
+frames (4 of 240 on a fast turntable); about +2 ms per frame with marks on an RTX 4070 laptop GPU
+(+1 ms without).
+**Not FO-safe for dark, thin objects:** on a production recording with loose walnut stems (2 Oct)
+the cut removes the stems' marks. A dark stem's spectrum differs from the belt's mostly in
+brightness, which the spectral angle ignores (8-11 deg on a few cells, below the frame's Otsu
+level), and a stem's mark that touches another kept mark is not brought back by the `invert` gate.
+
+## MaskBlobFilter
+
+`cuvis_ai_patchcore.node.objectness.MaskBlobFilter` — `MaskMinArea`, `SpectralObjectMask` and
+`MaskBlobGate` in one pass, for a live pipeline: one labelling of the cell grid, both tests per
+blob, nothing done on an empty mask, one small copy to the host. A blob is kept if it has at least
+`min_area` marked pixels and at least `min_object_px` of them lie in object cells: cells whose
+first pixel (the stride-`cell` grid) has a spectral angle above `min_angle_deg` to the per-band
+median of every `median_stride`-th pixel. Identical to the three-node chain with the same
+parameters (tested).
+
+| Port | Direction | Shape / dtype | Notes |
+|---|---|---|---|
+| `decisions` | in | `[B, H, W, C]` bool | e.g. a `FrameScoreGate`'s decisions |
+| `cube` | in, optional | `[B, H, W, K]` float32 | the frames' cube; without it only the size test runs |
+| `decisions` | out | `[B, H, W, C]` bool | the blobs that pass both tests |
+
+hparams: `min_area` (250), `min_object_px` (16; `0` skips the object test), `min_angle_deg` (6.0),
+`cell` (4), `median_stride` (8). Stateless, not differentiable. On a 1000 x 1080 x 61 frame with
+FO marks it takes about 1 ms on an RTX 4070 laptop GPU, 0.1 ms on a clean frame; with
+`MaskPersistence` behind it the two walnut FO pipelines run +1.5 to +2.7 ms per FO frame.
+
+## Planned move of the generic nodes
+
+Every node here except `PatchCoreDetector` is a plain score or mask operation (fusion, gate, calibration, blob
+filters, persistence, spatial resampling). They are planned to move into cuvis-ai's built-in node library
+(cuvis-ai issues #105, #108, #109), where the overlapping built-in nodes are extended instead of duplicated. The class
+paths in this plugin stay listed in `plugins.yaml` for one minor-release window after that move, marked deprecated,
+so pipelines written against 0.3.0 keep loading; the next major release removes them.
 
 ## Install
 
@@ -161,20 +408,38 @@ capabilities:
   - class_name: cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
+  - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
+  - class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
+  - class_name: cuvis_ai_patchcore.node.spatial.GridSubsample
+  - class_name: cuvis_ai_patchcore.node.spatial.ScoreUpsample
+  - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapSuppression
+  - class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
+  - class_name: cuvis_ai_patchcore.node.morphology.MaskMinArea
+  - class_name: cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing
+  - class_name: cuvis_ai_patchcore.node.objectness.SpectralObjectMask
+  - class_name: cuvis_ai_patchcore.node.morphology.MaskBlobGate
+  - class_name: cuvis_ai_patchcore.node.objectness.MaskBlobFilter
+  - class_name: cuvis_ai_patchcore.node.morphology.MaskPeakGate
 ```
 
-For a frozen, reproducible install, pin a release tag instead:
+For a frozen, reproducible install, pin a release tag instead (`GridSubsample`, `ScoreUpsample`,
+`ScoreMapSuppression`, `MaskPersistence`, `MaskMinArea`, `ScoreMapSmoothing`, `SpectralObjectMask`,
+`MaskBlobGate`, `MaskBlobFilter`, `MaskPeakGate`,
+`ScoreMapFusion(softmin)` and
+`ScoreRangeNormalizer(invert)` are not released yet, see the changelog):
 
 ```yaml
 name: patchcore
 repo: "https://github.com/cubert-hyperspectral/cuvis-ai-patchcore.git"
-tag: "v0.1.0"
+tag: "v0.3.0"
 package_name: cuvis-ai-patchcore
 capabilities:
   - class_name: cuvis_ai_patchcore.node.patchcore.PatchCoreDetector
   - class_name: cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer
   - class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
   - class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
+  - class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
+  - class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
 ```
 
 [`plugins.yaml`](plugins.yaml) is the local-path manifest of this repository, with the palette

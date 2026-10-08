@@ -7,7 +7,9 @@ scores far above the normal range keeps its rank because nothing is clamped abov
 is set by the single most extreme normal pixel (one specular highlight squashes a whole channel);
 a clamped percentile range saturates every anomaly, and everything else, on a drifted session.
 Both were measured to break the two-bank walnut fusion; this node is the calibration that
-reproduces the validated result, fitted on normal frames only (Phase 1).
+reproduces the validated result, fitted on normal frames only (Phase 1). With ``invert`` it
+calibrates the negated map, for maps where higher means more normal (a log-likelihood), so the
+output is an anomaly score on the same normal-range scale.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ class ScoreRangeNormalizer(Node):
         max_fit_values: int = 4_000_000,
         seed: int = 0,
         eps: float = 1e-9,
+        invert: bool = False,
         **kwargs: Any,
     ) -> None:
         """Create an unfitted calibrator; the bound buffers are sized from ``n_channels``.
@@ -70,6 +73,8 @@ class ScoreRangeNormalizer(Node):
             Phase-1 memory (``torch.quantile`` handles up to 16M values).
         seed : RNG seed of the cap.
         eps : floor for the ``(p_high - p_low)`` denominator.
+        invert : calibrate ``-x`` instead of ``x`` (fit and forward), for maps where higher means
+            more normal, e.g. a mixture log-likelihood; the percentiles are those of ``-x``.
         """
         if isinstance(n_channels, bool) or int(n_channels) < 1:
             raise ValueError(f"n_channels must be a positive integer, got {n_channels}")
@@ -87,6 +92,7 @@ class ScoreRangeNormalizer(Node):
         self.max_fit_values = int(max_fit_values)
         self.seed = int(seed)
         self.eps = float(eps)
+        self.invert = bool(invert)
         super().__init__(
             n_channels=self.n_channels,
             low=self.low,
@@ -96,6 +102,7 @@ class ScoreRangeNormalizer(Node):
             max_fit_values=self.max_fit_values,
             seed=self.seed,
             eps=self.eps,
+            invert=self.invert,
             **kwargs,
         )
         self.register_buffer("lo", torch.zeros(self.n_channels, dtype=torch.float32))
@@ -120,7 +127,7 @@ class ScoreRangeNormalizer(Node):
                     f"n_channels={self.n_channels}"
                 )
             v = subsample_hw(x, s).reshape(-1, self.n_channels).float()
-            chunks.append(v)
+            chunks.append(-v if self.invert else v)
             total += v.shape[0]
             if total > 2 * self.max_fit_values:  # bound memory while streaming
                 chunks = [random_cap(torch.cat(chunks, dim=0), self.max_fit_values, gen)]
@@ -146,7 +153,8 @@ class ScoreRangeNormalizer(Node):
     def forward(self, scores: Tensor, **_: Any) -> dict[str, Tensor]:
         """Calibrate the maps to the fitted normal range."""
         require_fitted(self)
-        out = (scores - self.lo) / (self.hi - self.lo).clamp_min(self.eps)
+        x = -scores if self.invert else scores
+        out = (x - self.lo) / (self.hi - self.lo).clamp_min(self.eps)
         if self.floor:
             out = out.clamp_min(0.0)
         return {"normalized": out}

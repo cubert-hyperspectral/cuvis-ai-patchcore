@@ -17,9 +17,16 @@ from cuvis_ai_schemas.execution import Context
 from cuvis_ai_schemas.pipeline import PortSpec
 
 from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
-from cuvis_ai_patchcore.node.fusion import ScoreMapFusion
+from cuvis_ai_patchcore.node.fusion import (
+    DecisionFusion,
+    MaskComposite,
+    ScoreMapFusion,
+    ScoreMapSuppression,
+)
 from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
+from cuvis_ai_patchcore.node.spatial import GridSubsample, ScoreUpsample
+from cuvis_ai_patchcore.node.temporal import MaskPersistence
 
 pytestmark = pytest.mark.integration
 
@@ -240,8 +247,9 @@ def test_calibrated_two_bank_fusion_pipeline_reloads(tmp_path):
 
 
 def test_gated_priority_display_pipeline_reloads(tmp_path):
-    """Gates -> ScoreMapFusion(mode="first"): the gate hparams, the alarm_scores wiring and the
-    variadic connection order (which `first` depends on) survive save -> load."""
+    """Gates -> ScoreMapFusion(mode="first") and DecisionFusion(mode="first"): the gate hparams,
+    the alarm_scores wiring and the variadic connection order (which `first` depends on) survive
+    save -> load."""
     src = _ConstantCubeSource(seed=5, name="src")
     pc = PatchCoreDetector(
         input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
@@ -255,6 +263,8 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     gate_a = FrameScoreGate(threshold=0.0, topk_frac=0.01, name="gate_a")
     gate_b = FrameScoreGate(threshold=0.0, mode="mask", mask_threshold=0.5, name="gate_b")
     fuse = ScoreMapFusion(mode="first", name="fuse")
+    masks = DecisionFusion(mode="first", name="masks")
+    comp = MaskComposite(labels=[1, 2, 3], levels=[0.25, 0.5, 1.0], name="comp")
     pipe = CuvisPipeline("gated_priority_display_smoke")
     pipe.connect(src.outputs.cube, pc.inputs.cube)
     pipe.connect(pc.outputs.scores, cal.inputs.scores)
@@ -264,6 +274,8 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     pipe.connect(cal.outputs.normalized, gate_b.inputs.scores)
     for gate in (blank, gate_a, gate_b):
         pipe.connect(gate.outputs.scores, fuse.inputs.scores)
+        pipe.connect(gate.outputs.decisions, masks.inputs.decisions)
+        pipe.connect(gate.outputs.decisions, comp.inputs.decisions)
 
     ctx = Context(stage=ExecutionStage.INFERENCE)
     before = pipe.forward(batch={}, context=ctx)
@@ -273,6 +285,17 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     ].tolist() == [1]
     assert torch.equal(before[("fuse", "scores")], before[("gate_a", "scores")])
     assert not torch.equal(before[("gate_a", "scores")], before[("gate_b", "scores")])
+    # the mask of the displayed gate: gate_blank has none, gate_a's comes first
+    assert not before[("gate_blank", "decisions")].any()
+    assert before[("gate_a", "decisions")].any()
+    assert torch.equal(before[("masks", "decisions")], before[("gate_a", "decisions")])
+    # composite: gate_a -> 2, gate_b -> 3 (on top), gate_blank never set
+    exp = torch.where(
+        before[("gate_b", "decisions")][..., 0],
+        3,
+        torch.where(before[("gate_a", "decisions")][..., 0], 2, 0),
+    ).to(torch.int32)
+    assert torch.equal(before[("comp", "mask")], exp)
 
     yaml_path = tmp_path / "gated.yaml"
     pipe.save_to_file(str(yaml_path))
@@ -297,3 +320,193 @@ def test_gated_priority_display_pipeline_reloads(tmp_path):
     for key in (("gate_a", "frame_score"), ("gate_b", "scores"), ("fuse", "scores")):
         assert torch.allclose(after[key], before[key], atol=1e-6), key
     assert torch.equal(after[("fuse", "scores")], after[("gate_a", "scores")])
+    assert nodes["masks"].hparams["mode"] == "first"
+    assert torch.equal(after[("masks", "decisions")], before[("masks", "decisions")])
+    assert nodes["comp"].hparams["labels"] == [1, 2, 3]
+    assert nodes["comp"].hparams["levels"] == [0.25, 0.5, 1.0]
+    for key in (("comp", "mask"), ("comp", "scores")):
+        assert torch.equal(after[key], before[key]), key
+
+
+class _GridLogLik(Node):
+    """Module-scope test node: a toy per-pixel log-likelihood of a cube (higher = more normal)."""
+
+    _category = NodeCategory.MODEL
+    _tags = frozenset({NodeTag.TORCH})
+    INPUT_SPECS = {"cube": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, -1))}
+    OUTPUT_SPECS = {"scores": PortSpec(dtype=torch.float32, shape=(-1, -1, -1, 1))}
+
+    def forward(self, cube: torch.Tensor, **_) -> dict[str, torch.Tensor]:
+        return {"scores": -(cube - 2.0).square().mean(dim=-1, keepdim=True)}
+
+
+def test_spectral_softmin_fusion_pipeline_reloads(tmp_path):
+    """GridSubsample -> a per-pixel log-likelihood -> ScoreUpsample -> ScoreRangeNormalizer(invert),
+    fused with a calibrated PatchCore map by ScoreMapFusion(softmin): the new hparams (stride, mode,
+    invert, beta, weights) and the reference wiring survive save -> load."""
+    src = _ConstantCubeSource(seed=7, name="src")
+    grid = GridSubsample(stride=2, name="grid")
+    ll = _GridLogLik(name="ll")
+    up = ScoreUpsample(name="up")
+    ncal = ScoreRangeNormalizer(fit_subsample=1, invert=True, name="ncal")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    pcal = ScoreRangeNormalizer(fit_subsample=1, name="pcal")
+    fuse = ScoreMapFusion(mode="softmin", beta=5.0, weights=[1.0, 2.0], name="fuse")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(2)) * 2 + 1
+    ll_map = up(scores=ll(cube=grid(cube=ref)["cube"])["scores"], reference=ref)["scores"]
+    ncal.statistical_initialization(iter([{"scores": ll_map}]))
+    pcal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    pipe = CuvisPipeline("spectral_softmin_fusion_smoke")
+    pipe.connect(src.outputs.cube, grid.inputs.cube)
+    pipe.connect(grid.outputs.cube, ll.inputs.cube)
+    pipe.connect(ll.outputs.scores, up.inputs.scores)
+    pipe.connect(src.outputs.cube, up.inputs.reference)
+    pipe.connect(up.outputs.scores, ncal.inputs.scores)
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, pcal.inputs.scores)
+    # save_to_file writes a fan-in in the order its source nodes entered the graph (ncal before
+    # pcal here), which is the order after a reload; connect in that order so a weighted rule means
+    # the same map order before and after
+    pipe.connect(ncal.outputs.normalized, fuse.inputs.scores)
+    pipe.connect(pcal.outputs.normalized, fuse.inputs.scores)
+
+    ctx = Context(stage=ExecutionStage.INFERENCE)
+    before = pipe.forward(batch={}, context=ctx)
+    assert before[("up", "scores")].shape == (1, H, W, 1)
+    manual = ScoreMapFusion(mode="softmin", beta=5.0, weights=[1.0, 2.0])(
+        scores=[before[("ncal", "normalized")], before[("pcal", "normalized")]]
+    )["scores"]
+    assert torch.allclose(before[("fuse", "scores")], manual, atol=1e-6)
+
+    yaml_path = tmp_path / "softmin.yaml"
+    pipe.save_to_file(str(yaml_path))
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert nodes["grid"].hparams["stride"] == 2 and nodes["up"].hparams["mode"] == "bilinear"
+    assert nodes["ncal"].hparams["invert"] is True and nodes["pcal"].hparams["invert"] is False
+    assert nodes["fuse"].hparams["beta"] == 5.0 and nodes["fuse"].hparams["weights"] == [1.0, 2.0]
+    after = restored.forward(batch={}, context=ctx)
+    for key in (("ncal", "normalized"), ("pcal", "normalized"), ("fuse", "scores")):
+        assert torch.allclose(after[key], before[key], atol=1e-6), key
+
+
+def test_suppressed_gate_pipeline_reloads(tmp_path):
+    """PatchCore -> normaliser -> ScoreMapSuppression (mask = a mask-mode gate's decisions, the
+    stand-in for a segmenter's mask) -> FrameScoreGate: the suppression hparams and the two-input
+    wiring survive save -> load, and the gate sees the suppressed map."""
+    src = _ConstantCubeSource(seed=5, name="src")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    cal = ScoreRangeNormalizer(fit_subsample=1, name="cal")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    cal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    shells = FrameScoreGate(threshold=0.0, mode="mask", mask_threshold=0.5, name="shells")
+    sup = ScoreMapSuppression(weight=0.75, erode_px=1, name="sup")
+    gate = FrameScoreGate(threshold=0.0, name="gate")
+    pipe = CuvisPipeline("suppressed_gate_smoke")
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, cal.inputs.scores)
+    pipe.connect(cal.outputs.normalized, shells.inputs.scores)
+    pipe.connect(cal.outputs.normalized, sup.inputs.scores)
+    pipe.connect(shells.outputs.decisions, sup.inputs.mask)
+    pipe.connect(sup.outputs.scores, gate.inputs.scores)
+
+    ctx = Context(stage=ExecutionStage.INFERENCE)
+    before = pipe.forward(batch={}, context=ctx)
+    mask = before[("shells", "decisions")]
+    assert mask.any() and not mask.all()
+    exp = ScoreMapSuppression(weight=0.75, erode_px=1)(
+        scores=before[("cal", "normalized")], mask=mask
+    )["scores"]
+    assert torch.equal(before[("sup", "scores")], exp)
+
+    yaml_path = tmp_path / "suppressed.yaml"
+    pipe.save_to_file(str(yaml_path))
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert nodes["sup"].hparams["weight"] == 0.75 and nodes["sup"].hparams["erode_px"] == 1
+    after = restored.forward(batch={}, context=ctx)
+    for key in (("sup", "scores"), ("gate", "frame_score"), ("gate", "scores")):
+        assert torch.allclose(after[key], before[key], atol=1e-6), key
+
+
+def test_persistent_mask_pipeline_reloads(tmp_path):
+    """FrameScoreGate.decisions -> MaskPersistence -> MaskComposite, the walnut flicker filter: the
+    radius survives save -> load, the .pt holds nothing for the filter, and both the built and the
+    restored pipeline show the gate's mask from the second frame on (the first frame shows none)."""
+    src = _ConstantCubeSource(seed=5, name="src")
+    pc = PatchCoreDetector(
+        input_channels=C, coreset_size=32, stride=2, bank_stride=2, max_bank_size=200, name="pc"
+    )
+    cal = ScoreRangeNormalizer(fit_subsample=1, name="cal")
+    _fit(pc)
+    ref = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    cal.statistical_initialization(iter([{"scores": pc(cube=ref)["scores"]}]))
+    gate = FrameScoreGate(threshold=0.0, mask_threshold=0.5, name="gate")
+    persist = MaskPersistence(radius_px=3, name="persist")
+    comp = MaskComposite(labels=[2], levels=[1.0], name="comp")
+    pipe = CuvisPipeline("persistent_mask_smoke")
+    pipe.connect(src.outputs.cube, pc.inputs.cube)
+    pipe.connect(pc.outputs.scores, cal.inputs.scores)
+    pipe.connect(cal.outputs.normalized, gate.inputs.scores)
+    pipe.connect(gate.outputs.decisions, persist.inputs.decisions)
+    pipe.connect(persist.outputs.decisions, comp.inputs.decisions)
+
+    def two_frames(p: CuvisPipeline) -> tuple[dict, dict]:
+        ctx = Context(stage=ExecutionStage.INFERENCE)
+        return p.forward(batch={}, context=ctx), p.forward(batch={}, context=ctx)
+
+    first, second = two_frames(pipe)
+    mask = first[("gate", "decisions")]
+    assert mask.any() and not mask.all()
+    assert not first[("persist", "decisions")].any() and not first[("comp", "mask")].any()
+    assert torch.equal(second[("persist", "decisions")], mask)  # same frame twice: all persists
+    assert torch.equal(second[("comp", "mask")], mask[..., 0].to(torch.int32) * 2)
+
+    yaml_path = tmp_path / "persistent.yaml"
+    pipe.save_to_file(str(yaml_path))
+    weights = torch.load(yaml_path.with_suffix(".pt"), map_location="cpu", weights_only=False)
+    assert len(weights["state_dict"].get("persist", {})) == 0
+    cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    cfg["plugins"] = ["patchcore"]
+    yaml_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    registry = NodeRegistry()
+    registry.register_plugin(str(REPO / "plugins.yaml"))
+    restored = CuvisPipeline.load_pipeline(
+        str(yaml_path),
+        weights_path=str(yaml_path.with_suffix(".pt")),
+        device="cpu",
+        node_registry=registry,
+    )
+    nodes = {n.name: n for n in restored.nodes if not isinstance(n, str)}
+    assert isinstance(nodes["persist"], MaskPersistence)
+    assert nodes["persist"].hparams["radius_px"] == 3
+    again_first, again_second = two_frames(restored)
+    assert not again_first[("comp", "mask")].any()
+    for key in (("gate", "decisions"), ("persist", "decisions"), ("comp", "mask")):
+        assert torch.equal(again_second[key], second[key]), key
