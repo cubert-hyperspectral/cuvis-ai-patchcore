@@ -6,7 +6,7 @@ registers the tuple with cuvis-ai-core's ``ModelWeights`` at import, and cuvis-a
 the installer know what to provision without importing the plugin.
 
 The rows are the six Cubert-trained walnut foreign-object pipelines published at
-``cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts``: one fitted state (``.pt``)
+``cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts``: one fitted state (``.pt``)
 per pipeline with its yaml and the two shell-segmentation weight files as aux files, so
 ``download-model download <name>`` fetches a runnable folder. The detector of every pipeline is
 ``PatchCoreDetector``; the SteerViT features and the RF-DETR shell segmentation come from the
@@ -20,8 +20,8 @@ from cuvis_ai_schemas.plugin import AuxFile, PluginWeightEntry
 PLUGIN_NAME = "patchcore"
 """The manifest name of this plugin (what pipelines list under ``plugins:``)."""
 
-_WALNUT_REPO = "cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts"
-_WALNUT_REVISION = "defcb3991e841a89d72d36c88ca2df6557938d9c"
+_WALNUT_REPO = "cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts"
+_WALNUT_REVISION = "e1629236014519c9535196f1d1905cbad5867a51"
 """The published commit of the walnut model repository (40 hex digits)."""
 
 _SHELL_AUX_FILES = (

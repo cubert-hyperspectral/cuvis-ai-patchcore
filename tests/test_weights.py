@@ -37,3 +37,8 @@ def test_names_are_unique_and_registered():
 def test_rows_share_the_published_repo_and_revision():
     assert {row.repo_id for row in WEIGHTS} == {_WALNUT_REPO}
     assert {row.revision for row in WEIGHTS} == {_WALNUT_REVISION}
+
+
+def test_rows_point_at_the_published_repository_name():
+    assert _WALNUT_REPO == "cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts"
+    assert re.fullmatch(r"[0-9a-f]{40}", _WALNUT_REVISION)

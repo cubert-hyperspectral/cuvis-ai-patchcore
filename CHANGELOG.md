@@ -6,7 +6,7 @@
 - Declared the six Cubert-trained walnut foreign-object pipelines as `trained_pipeline` weight rows
   (`cuvis_ai_patchcore/weights.py`, registered with `ModelWeights` at import, projected into the
   manifest's `weights:` block): one `.pt` per pipeline from
-  `cubert-gmbh/XMR_Industrial_Foreign_Object_Detection_Walnuts` with its yaml and the two shell
+  `cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts` with its yaml and the two shell
   segmentation weight files as aux files, so `download-model download <name>` fetches a runnable
   folder.
 
