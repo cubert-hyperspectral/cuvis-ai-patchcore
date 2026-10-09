@@ -361,3 +361,106 @@ capabilities:
       optional: false
       description: 'Same shape as `decisions`: the blobs whose highest score reaches `ratio` times the highest score of the reference blob they lie in; blobs outside every reference blob stay.'
   doc_summary: Keep the blobs of a mask whose peak score reaches a share of their reference blob's peak.
+weights:
+- name: walnut_best_refit
+  display_name: Walnut foreign objects, refit (stand pick)
+  summary: Walnut foreign objects, refit banks, robust mask
+  used_for: [Anomaly detection, Trained pipeline]
+  kind: trained_pipeline
+  repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
+  filename: walnut_best_refit/walnut_best_refit.pt
+  revision: e1629236014519c9535196f1d1905cbad5867a51
+  sha256: 8ef10835d72f58cdd2e7d4e09a53e2eed5955d45cbf0891e71c8243b09c17e3f
+  size_bytes: 916906227
+  aux_files:
+  - {path: walnut_best_refit/walnut_best_refit.yaml, size_bytes: 8753, sha256: e41150ce0747ee913fa5ba8f1473d889dc6b45fd77d50c638bfff8aad0ba6ec9}
+  - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
+  - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
+  license: Apache-2.0
+  license_file: LICENSE
+  description: Walnut foreign-object pipeline with the 1 October refit banks and the robust mask, the first choice at the production stand.
+- name: walnut_best_original
+  display_name: Walnut foreign objects, original
+  summary: Walnut foreign objects, original banks, robust mask
+  used_for: [Anomaly detection, Trained pipeline]
+  kind: trained_pipeline
+  repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
+  filename: walnut_best_original/walnut_best_original.pt
+  revision: e1629236014519c9535196f1d1905cbad5867a51
+  sha256: 0b8812933b7585017afea2cf5558d3aa2aa6dbb1ce5e7044aa91e4c9b24062f5
+  size_bytes: 916907738
+  aux_files:
+  - {path: walnut_best_original/walnut_best_original.yaml, size_bytes: 8757, sha256: ba08d05e285eeca0cca8b651e6e8f786015279a52ce8d75c50bd050a7420d2a3}
+  - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
+  - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
+  license: Apache-2.0
+  license_file: LICENSE
+  description: Walnut foreign-object pipeline with the original banks and the robust mask, for lighting other than the production stand.
+- name: walnut_best_refit_cut
+  display_name: Walnut foreign objects, refit, cut mask
+  summary: Refit banks, robust mask cut to the objects
+  used_for: [Anomaly detection, Trained pipeline]
+  kind: trained_pipeline
+  repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
+  filename: walnut_best_refit_cut/walnut_best_refit_cut.pt
+  revision: e1629236014519c9535196f1d1905cbad5867a51
+  sha256: a1d3ef939263e9ee558cf810f86bb806053ac924dbe6662ca2bdc985f37dbc95
+  size_bytes: 916908007
+  aux_files:
+  - {path: walnut_best_refit_cut/walnut_best_refit_cut.yaml, size_bytes: 10642, sha256: ca858dc0b6bb1d2cd993c6ab2ac583a33f2ad260b8e53386c52ada1b1b18f469}
+  - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
+  - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
+  license: Apache-2.0
+  license_file: LICENSE
+  description: The refit walnut pipeline with the mask cut to the objects of the frame, for a tighter display at a small cost per frame.
+- name: walnut_best_original_cut
+  display_name: Walnut foreign objects, original, cut mask
+  summary: Original banks, robust mask cut to the objects
+  used_for: [Anomaly detection, Trained pipeline]
+  kind: trained_pipeline
+  repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
+  filename: walnut_best_original_cut/walnut_best_original_cut.pt
+  revision: e1629236014519c9535196f1d1905cbad5867a51
+  sha256: 1966c03d2d0831bca1b195592bc4de86d6aed37f32a274bfa9b3e92a67fdb699
+  size_bytes: 916909582
+  aux_files:
+  - {path: walnut_best_original_cut/walnut_best_original_cut.yaml, size_bytes: 10644, sha256: 0e124a0e812da2ea21f98a54c6eec3043fb41dd47d449235a94fbe442e4cddbe}
+  - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
+  - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
+  license: Apache-2.0
+  license_file: LICENSE
+  description: The original walnut pipeline with the mask cut to the objects of the frame, for a tighter display at a small cost per frame.
+- name: walnut_best_refit_shellaware
+  display_name: Walnut foreign objects, refit, shell-aware
+  summary: Refit banks, FO map damped on segmented shells
+  used_for: [Anomaly detection, Trained pipeline]
+  kind: trained_pipeline
+  repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
+  filename: walnut_best_refit_shellaware/walnut_best_refit_shellaware.pt
+  revision: e1629236014519c9535196f1d1905cbad5867a51
+  sha256: 9283acf93e16de371e30a3ed9cf6e28c4c02410101669f3e92f6d1217d141ef0
+  size_bytes: 916911298
+  aux_files:
+  - {path: walnut_best_refit_shellaware/walnut_best_refit_shellaware.yaml, size_bytes: 8968, sha256: 67b9de9503f38c82ebdcd7658bf17451e892e9739dea43cc2d7670831b414ce4}
+  - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
+  - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
+  license: Apache-2.0
+  license_file: LICENSE
+  description: The refit walnut pipeline with the foreign-object map damped on the segmented shells, for stands where real shells next to a foreign object light up.
+- name: walnut_best_original_shellaware
+  display_name: Walnut foreign objects, original, shell-aware
+  summary: Original banks, FO map damped on segmented shells
+  used_for: [Anomaly detection, Trained pipeline]
+  kind: trained_pipeline
+  repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
+  filename: walnut_best_original_shellaware/walnut_best_original_shellaware.pt
+  revision: e1629236014519c9535196f1d1905cbad5867a51
+  sha256: 6d32cadefa4d5f99cfaa00fca6ad8d9d3e866f9a65175cc1ab28446fa83775fa
+  size_bytes: 916912809
+  aux_files:
+  - {path: walnut_best_original_shellaware/walnut_best_original_shellaware.yaml, size_bytes: 8944, sha256: 429179147ecf93a93be410a40a0d398932966791f8f8ce7e63ddd540e78a1524}
+  - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
+  - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
+  license: Apache-2.0
+  license_file: LICENSE
+  description: The original walnut pipeline with the foreign-object map damped on the segmented shells, for stands where real shells next to a foreign object light up.
