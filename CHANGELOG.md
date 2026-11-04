@@ -15,12 +15,26 @@
 
 ### Fixed
 - `PatchCoreDetector`'s nearest-coreset distance no longer reports the value `torch.cdist` derives
-  from its matmul expansion (`|q|^2 + |c|^2 - 2 q.c`); that expansion now only selects the nearest
-  coreset row, and the reported distance is always the exact difference-form norm on the original
-  fp32 rows. Eager torch and ONNX Runtime decompose the expansion's fp32 cancellation differently
-  at scale, which pushed a traced export outside the exporter's default tolerance; the exact
-  distance removes that gap regardless of backend. The reduced-precision (`autocast_dtype`) search
-  and the `tf32` matmul option are unchanged.
+  from its matmul expansion (`|q|^2 + |c|^2 - 2 q.c`); that expansion now only selects the 8
+  nearest coreset rows (`torch.topk`), and the reported distance is always the exact
+  difference-form norm over that shortlist, on the original fp32 rows. Eager torch and ONNX
+  Runtime decompose the expansion's fp32 cancellation differently at scale, which pushed a traced
+  export outside the exporter's default tolerance; the exact distance removes that gap regardless
+  of backend. The reduced-precision (`autocast_dtype`) search and the `tf32` matmul option are
+  unchanged.
+  Three shortlist mechanisms were measured end to end (median GPU compute per 1000x1080x61 frame;
+  eager CUDA isolated on the laptop, ONNX Runtime CUDA from `compare_deploy.py`, and TensorRT
+  10.13.3 on the Jetson Thor via `trtexec`, the deployment target):
+  - old matmul-only `cdist(...).min()` (the pre-fix form, not ONNX-exportable at the default
+    tolerance): eager 29-30 ms (batch 1) / 235 ms (batch 8); Thor 38.5 ms.
+  - `torch.topk(k=8)` shortlist with exact rescoring (kept): eager 48-50 ms (batch 1) / 398-411 ms
+    (batch 8); ONNX Runtime CUDA about 54-69 ms per frame with the GPU idle; Thor 48.0 ms
+    (engine build 11.1 s).
+  - 2 rounds of `min` plus a `scatter` of +inf at the winner (tried, reverted): about the same
+    eager cost as the `topk` form (48-50 ms vs 54 ms with the GPU idle), but 82.7 ms on the Thor
+    (engine build 10.7 s, 12 fps): TensorRT implements `TopK` as a native op, while the `scatter`
+    inside the chunk loop costs it a lot. Kept `torch.topk(k=8)` since the Jetson is the
+    deployment target.
 - `examples/trainrun_patchcore_cu3s.yaml` no longer carries a `training:` block: PatchCoreDetector
   has no gradient-trainable parameters, so a gradient trainer built for it fails with "optimizer
   got an empty parameter list". Phase 1 is statistical-only and needs no `training:` section.
@@ -28,12 +42,6 @@
 ### Changed
 - Raised the `cuvis-ai-core` floor to `>=0.19.2` and added `cuvis-ai-core[onnx]` to the `dev` extra,
   for the dynamo exporter and its ONNX Runtime parity check used by the new export test.
-- The exact-distance shortlist in `PatchCoreDetector._nearest_distance` picks its two nearest
-  candidates with plain `min` and a scatter, not `torch.topk`: on CUDA, `topk` is a radix select
-  whose cost barely depends on how many rows it keeps, about 2x a plain `min` even at a narrow
-  width. Two rounds of `min` cost about 1.6-1.7x the old single-`min` search (measured in
-  isolation on the production grid size, both batch 1 and batch 8) and keep the same real-data
-  ONNX parity.
 
 ## 0.3.0 - 2026-10-07
 

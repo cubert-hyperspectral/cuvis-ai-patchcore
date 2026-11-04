@@ -71,16 +71,12 @@ _AUTOCAST_DTYPES: dict[str, torch.dtype] = {
 # pre-scaling alone.
 _HALF_CLIP = 64.0
 _HALF_SCALE = 1.0 / 16.0
-# How many matmul-form nearest candidates get re-scored exactly in ``_nearest_distance``, one
-# ``min`` + ``scatter`` round per candidate (never ``torch.topk``: on CUDA it is a radix select
-# whose cost barely depends on k, 2-4x a plain ``min`` even at k=2, so a handful of ``min``
-# rounds beats one ``topk`` call for a shortlist this narrow). The matmul expansion
-# |q|^2 + |c|^2 - 2 q.c is accurate enough that the true nearest row is in the top 2 candidates
-# on every case found so far, including the real fitted 8000-row coreset that first exposed the
-# single-candidate (k=1) gap between eager torch and an ONNX Runtime graph; k=2 closed it with
-# about 1.6-1.7x the cost of the old single ``min`` (measured in isolation on CUDA, production
-# grid size, both batch 1 and batch 8: see tests/test_onnx_export.py for the correctness side).
-_REFINE_ROUNDS = 2
+# How many matmul-form nearest candidates get re-scored exactly in ``_nearest_distance``. The
+# matmul expansion |q|^2 + |c|^2 - 2 q.c is accurate enough to shortlist the true nearest row
+# almost always in the top few candidates, even when eager torch and an ONNX Runtime graph
+# decompose its fp32 cancellation differently; a shortlist this wide absorbs that disagreement
+# without the cost of scoring the whole coreset exactly (see tests/test_onnx_export.py).
+_REFINE_TOPK = 8
 
 
 class PatchCoreDetector(Node):
@@ -274,15 +270,11 @@ class PatchCoreDetector(Node):
         ``torch.cdist`` picks candidates from its matmul expansion
         ``|q|^2 + |c|^2 - 2 q.c``; eager torch and an ONNX Runtime graph from the dynamo exporter
         decompose that expansion's fp32 cancellation differently, which can disagree on which
-        single row is nearest when two rows are close. ``_REFINE_ROUNDS`` rounds of ``min`` plus
-        a ``scatter`` of +inf at the winner shortlist that many nearest candidates by the matmul
-        form, each rescored exactly (``||q - c||`` on the original fp32 rows, no cancellation
-        term); the reported distance is the smallest of those exact values. The shortlist is wide
-        enough that the true nearest row is overwhelmingly likely to be in it, so the reported
-        distance is insensitive to the backends' disagreement. ``min`` plus ``scatter`` in a
-        Python loop, not ``torch.topk``: CUDA's ``topk`` is a radix select whose cost barely
-        depends on k and is 2-3x a plain ``min``, so a handful of ``min`` rounds is cheaper than
-        one ``topk`` call for a shortlist this narrow.
+        single row is nearest when two rows are close. Taking the ``_REFINE_TOPK`` nearest
+        candidates by the matmul form, then rescoring only those few exactly
+        (``||q - c||`` on the original fp32 rows, no cancellation term) and keeping the closest,
+        makes the reported distance insensitive to that disagreement: the true nearest row is
+        overwhelmingly likely to be in the shortlist, and the exact rescoring resolves the rest.
         """
         bank = self.coreset
         search_flat, search_bank = flat, bank
@@ -293,23 +285,19 @@ class PatchCoreDetector(Node):
                 search_bank = bank.clamp(-_HALF_CLIP, _HALF_CLIP)
             search_flat = (search_flat * _HALF_SCALE).to(self._nn_dtype)
             search_bank = (search_bank * _HALF_SCALE).to(self._nn_dtype)
+        k = min(_REFINE_TOPK, bank.shape[0])
         out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
         with tf32_matmul(self.tf32 and flat.is_cuda and self._nn_dtype is None):
             for i in range(0, flat.shape[0], self.chunk_size):
                 search_chunk = search_flat[i : i + self.chunk_size]
-                chunk = flat[i : i + self.chunk_size]
                 distances = torch.cdist(search_chunk, search_bank)
-                best = torch.full(
-                    (chunk.shape[0],), float("inf"), dtype=torch.float32, device=flat.device
-                )
-                for _ in range(_REFINE_ROUNDS):
-                    _, idx = distances.min(dim=1)
-                    # This round's winner only; the reported distance is always the exact fp32
-                    # difference-form norm, never the matmul expansion's value.
-                    exact = (chunk - bank[idx]).norm(dim=1)
-                    best = torch.minimum(best, exact)
-                    distances = distances.scatter(1, idx.unsqueeze(1), float("inf"))
-                out[i : i + chunk.shape[0]] = best
+                idx = torch.topk(distances, k, dim=1, largest=False).indices
+                # The shortlist only; the reported distance is always the exact fp32
+                # difference-form norm over those rows, never the matmul expansion's value.
+                chunk = flat[i : i + self.chunk_size]
+                candidates = bank[idx]  # [chunk, k, C]
+                diff = chunk.unsqueeze(1) - candidates
+                out[i : i + chunk.shape[0]] = diff.norm(dim=2).min(dim=1).values
         return out
 
     # ------------------------------------------------------------------ phase 1
