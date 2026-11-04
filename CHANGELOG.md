@@ -28,6 +28,12 @@
 ### Changed
 - Raised the `cuvis-ai-core` floor to `>=0.19.2` and added `cuvis-ai-core[onnx]` to the `dev` extra,
   for the dynamo exporter and its ONNX Runtime parity check used by the new export test.
+- The exact-distance shortlist in `PatchCoreDetector._nearest_distance` picks its two nearest
+  candidates with plain `min` and a scatter, not `torch.topk`: on CUDA, `topk` is a radix select
+  whose cost barely depends on how many rows it keeps, about 2x a plain `min` even at a narrow
+  width. Two rounds of `min` cost about 1.6-1.7x the old single-`min` search (measured in
+  isolation on the production grid size, both batch 1 and batch 8) and keep the same real-data
+  ONNX parity.
 
 ## 0.3.0 - 2026-10-07
 
