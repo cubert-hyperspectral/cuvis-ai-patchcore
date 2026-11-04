@@ -71,6 +71,12 @@ _AUTOCAST_DTYPES: dict[str, torch.dtype] = {
 # pre-scaling alone.
 _HALF_CLIP = 64.0
 _HALF_SCALE = 1.0 / 16.0
+# How many matmul-form nearest candidates get re-scored exactly in ``_nearest_distance``. The
+# matmul expansion |q|^2 + |c|^2 - 2 q.c is accurate enough to shortlist the true nearest row
+# almost always in the top few candidates, even when eager torch and an ONNX Runtime graph
+# decompose its fp32 cancellation differently; a shortlist this wide absorbs that disagreement
+# without the cost of scoring the whole coreset exactly (see tests/test_onnx_export.py).
+_REFINE_TOPK = 8
 
 
 class PatchCoreDetector(Node):
@@ -261,15 +267,14 @@ class PatchCoreDetector(Node):
     def _nearest_distance(self, flat: Tensor) -> Tensor:
         """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row.
 
-        ``torch.cdist`` picks the nearest row from its matmul expansion
-        ``|q|^2 + |c|^2 - 2 q.c``; that expansion is only used here to find the winning row
-        (``argmin``), never to report the distance. The reported value is recomputed in the plain
-        difference form ``||q - c_winner||`` on the original (fp32, unscaled) rows, so it matches a
-        float64 reference to machine precision and does not depend on how a given backend
-        (eager torch, or an ONNX Runtime graph from the dynamo exporter) implements the expansion's
-        fp32 cancellation. A tie between two coreset rows within the expansion's own error band can
-        still flip which one wins the ``argmin``, but the two candidate distances are then
-        provably within that same error band of each other, so the reported value barely moves.
+        ``torch.cdist`` picks candidates from its matmul expansion
+        ``|q|^2 + |c|^2 - 2 q.c``; eager torch and an ONNX Runtime graph from the dynamo exporter
+        decompose that expansion's fp32 cancellation differently, which can disagree on which
+        single row is nearest when two rows are close. Taking the ``_REFINE_TOPK`` nearest
+        candidates by the matmul form, then rescoring only those few exactly
+        (``||q - c||`` on the original fp32 rows, no cancellation term) and keeping the closest,
+        makes the reported distance insensitive to that disagreement: the true nearest row is
+        overwhelmingly likely to be in the shortlist, and the exact rescoring resolves the rest.
         """
         bank = self.coreset
         search_flat, search_bank = flat, bank
@@ -280,14 +285,19 @@ class PatchCoreDetector(Node):
                 search_bank = bank.clamp(-_HALF_CLIP, _HALF_CLIP)
             search_flat = (search_flat * _HALF_SCALE).to(self._nn_dtype)
             search_bank = (search_bank * _HALF_SCALE).to(self._nn_dtype)
+        k = min(_REFINE_TOPK, bank.shape[0])
         out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
         with tf32_matmul(self.tf32 and flat.is_cuda and self._nn_dtype is None):
             for i in range(0, flat.shape[0], self.chunk_size):
-                idx = torch.cdist(search_flat[i : i + self.chunk_size], search_bank).argmin(dim=1)
-                # The winning row only; the reported distance is always the exact fp32
-                # difference-form norm, never the matmul expansion's cancellation-prone value.
+                search_chunk = search_flat[i : i + self.chunk_size]
+                distances = torch.cdist(search_chunk, search_bank)
+                idx = torch.topk(distances, k, dim=1, largest=False).indices
+                # The shortlist only; the reported distance is always the exact fp32
+                # difference-form norm over those rows, never the matmul expansion's value.
                 chunk = flat[i : i + self.chunk_size]
-                out[i : i + chunk.shape[0]] = (chunk - bank[idx]).norm(dim=1)
+                candidates = bank[idx]  # [chunk, k, C]
+                diff = chunk.unsqueeze(1) - candidates
+                out[i : i + chunk.shape[0]] = diff.norm(dim=2).min(dim=1).values
         return out
 
     # ------------------------------------------------------------------ phase 1

@@ -2,9 +2,10 @@
 
 The detector's distance (``_nearest_distance``) is written so the reported value never depends on
 how a backend implements ``torch.cdist``'s matmul-expansion cancellation: the matmul form only
-picks the nearest coreset row, and the distance itself is the exact difference-form norm on fp32
-rows. That keeps a traced (ONNX) run within atol 1e-5 / rtol 1e-4 of the eager run on a realistic
-fitted coreset, with no extra tolerance needed at export time.
+shortlists the nearest coreset rows, and the distance is the exact difference-form norm on fp32
+rows over that shortlist. That keeps a traced (ONNX) run within atol 1e-5 / rtol 1e-4 of the eager
+run, including on a real fitted 8000-row coreset over a full hyperspectral frame, with no extra
+tolerance needed at export time.
 """
 
 from __future__ import annotations
