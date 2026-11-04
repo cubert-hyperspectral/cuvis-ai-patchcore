@@ -9,6 +9,25 @@
   `cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts` with its yaml and the two shell
   segmentation weight files as aux files, so `download-model download <name>` fetches a runnable
   folder.
+- Tagged `PatchCoreDetector` `NodeTag.ONNX`: its forward graph traces and exports with the dynamo
+  exporter (opset 18) within the exporter's default tolerance (atol 1e-5, rtol 1e-4), with or
+  without the `reference` port.
+
+### Fixed
+- `PatchCoreDetector`'s nearest-coreset distance no longer reports the value `torch.cdist` derives
+  from its matmul expansion (`|q|^2 + |c|^2 - 2 q.c`); that expansion now only selects the nearest
+  coreset row, and the reported distance is always the exact difference-form norm on the original
+  fp32 rows. Eager torch and ONNX Runtime decompose the expansion's fp32 cancellation differently
+  at scale, which pushed a traced export outside the exporter's default tolerance; the exact
+  distance removes that gap regardless of backend. The reduced-precision (`autocast_dtype`) search
+  and the `tf32` matmul option are unchanged.
+- `examples/trainrun_patchcore_cu3s.yaml` no longer carries a `training:` block: PatchCoreDetector
+  has no gradient-trainable parameters, so a gradient trainer built for it fails with "optimizer
+  got an empty parameter list". Phase 1 is statistical-only and needs no `training:` section.
+
+### Changed
+- Raised the `cuvis-ai-core` floor to `>=0.19.2` and added `cuvis-ai-core[onnx]` to the `dev` extra,
+  for the dynamo exporter and its ONNX Runtime parity check used by the new export test.
 
 ## 0.3.0 - 2026-10-07
 

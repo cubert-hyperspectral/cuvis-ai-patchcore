@@ -59,13 +59,15 @@ _AUTOCAST_DTYPES: dict[str, torch.dtype] = {
     "bfloat16": torch.bfloat16,
     "bf16": torch.bfloat16,
 }
-# Reduced-precision guard. ``torch.cdist`` expands |a-b|^2 = |a|^2 + |b|^2 - 2ab; with 61-band
-# z-scores a single far-out-of-distribution pixel (|z| in the hundreds after a session drift) pushes
-# that expansion past float16's 65504 -> inf distance -> a NaN/inf frame. Clamping |z| to
-# ``_HALF_CLIP`` and scaling by ``_HALF_SCALE`` keeps every intermediate in range (max squared
-# distance 4 * C * (clip * scale)^2 ~ 3.9e3 for C=61); the distance is rescaled afterwards, so
-# only pixels beyond 64 sigma (already extreme anomalies) differ from the float32 path. The clamp
-# is a z-unit assumption and is applied only when the node standardizes; raw feature grids get the
+# Reduced-precision guard for the nearest-row SEARCH only (the reported distance is always
+# recomputed exactly in fp32, see ``_nearest_distance``). ``torch.cdist`` expands
+# |a-b|^2 = |a|^2 + |b|^2 - 2ab; with 61-band z-scores a single far-out-of-distribution pixel
+# (|z| in the hundreds after a session drift) pushes that expansion past float16's 65504 -> inf
+# distance -> a search that never finds a finite nearest row. Clamping |z| to ``_HALF_CLIP`` and
+# scaling by ``_HALF_SCALE`` keeps every intermediate in range (max squared distance
+# 4 * C * (clip * scale)^2 ~ 3.9e3 for C=61), so only the nearest-row choice for pixels beyond 64
+# sigma (already extreme anomalies) can differ from the float32 path. The clamp is a z-unit
+# assumption and is applied only when the node standardizes; raw feature grids get the
 # pre-scaling alone.
 _HALF_CLIP = 64.0
 _HALF_SCALE = 1.0 / 16.0
@@ -75,7 +77,11 @@ class PatchCoreDetector(Node):
     """Nearest-coreset distance anomaly detector on spectra or dense feature grids (PatchCore)."""
 
     _category = NodeCategory.MODEL
-    _tags = frozenset({NodeTag.HYPERSPECTRAL, NodeTag.ANOMALY, NodeTag.TORCH, NodeTag.STATEFUL})
+    # ONNX: the forward graph traces and exports (dynamo, opset 18) within the exporter's default
+    # tolerance; see tests/test_onnx_export.py.
+    _tags = frozenset(
+        {NodeTag.HYPERSPECTRAL, NodeTag.ANOMALY, NodeTag.TORCH, NodeTag.STATEFUL, NodeTag.ONNX}
+    )
 
     INPUT_SPECS = {
         "cube": PortSpec(
@@ -253,22 +259,36 @@ class PatchCoreDetector(Node):
         return sums, counts.expand(cube.shape[0], -1, -1, -1)
 
     def _nearest_distance(self, flat: Tensor) -> Tensor:
-        """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row."""
+        """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row.
+
+        ``torch.cdist`` picks the nearest row from its matmul expansion
+        ``|q|^2 + |c|^2 - 2 q.c``; that expansion is only used here to find the winning row
+        (``argmin``), never to report the distance. The reported value is recomputed in the plain
+        difference form ``||q - c_winner||`` on the original (fp32, unscaled) rows, so it matches a
+        float64 reference to machine precision and does not depend on how a given backend
+        (eager torch, or an ONNX Runtime graph from the dynamo exporter) implements the expansion's
+        fp32 cancellation. A tie between two coreset rows within the expansion's own error band can
+        still flip which one wins the ``argmin``, but the two candidate distances are then
+        provably within that same error band of each other, so the reported value barely moves.
+        """
         bank = self.coreset
-        rescale = 1.0
-        if self._nn_dtype is not None and flat.is_cuda:
+        search_flat, search_bank = flat, bank
+        half_search = self._nn_dtype is not None and flat.is_cuda
+        if half_search:
             if self.standardize:  # the clamp is a z-unit assumption
-                flat = flat.clamp(-_HALF_CLIP, _HALF_CLIP)
-                bank = bank.clamp(-_HALF_CLIP, _HALF_CLIP)
-            flat = (flat * _HALF_SCALE).to(self._nn_dtype)
-            bank = (bank * _HALF_SCALE).to(self._nn_dtype)
-            rescale = 1.0 / _HALF_SCALE
+                search_flat = flat.clamp(-_HALF_CLIP, _HALF_CLIP)
+                search_bank = bank.clamp(-_HALF_CLIP, _HALF_CLIP)
+            search_flat = (search_flat * _HALF_SCALE).to(self._nn_dtype)
+            search_bank = (search_bank * _HALF_SCALE).to(self._nn_dtype)
         out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
         with tf32_matmul(self.tf32 and flat.is_cuda and self._nn_dtype is None):
             for i in range(0, flat.shape[0], self.chunk_size):
+                idx = torch.cdist(search_flat[i : i + self.chunk_size], search_bank).argmin(dim=1)
+                # The winning row only; the reported distance is always the exact fp32
+                # difference-form norm, never the matmul expansion's cancellation-prone value.
                 chunk = flat[i : i + self.chunk_size]
-                out[i : i + chunk.shape[0]] = torch.cdist(chunk, bank).min(dim=1).values.float()
-        return out * rescale if rescale != 1.0 else out
+                out[i : i + chunk.shape[0]] = (chunk - bank[idx]).norm(dim=1)
+        return out
 
     # ------------------------------------------------------------------ phase 1
     @torch.no_grad()

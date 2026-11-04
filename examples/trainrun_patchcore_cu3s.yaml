@@ -1,6 +1,8 @@
 # Phase-1-only trainrun for examples/patchcore_cu3s.yaml (TrainRunConfig, loadable by `restore-trainrun`).
 # PatchCoreDetector has no gradient-trainable state: StatisticalTrainer fits the band statistics
-# and the coreset from the TRAIN split, which must contain only NORMAL frames.
+# and the coreset from the TRAIN split, which must contain only NORMAL frames. There is no
+# `training:` block: PatchCoreDetector has no parameters, and a gradient trainer built for it
+# fails with "optimizer got an empty parameter list". Statistical-only Phase 1 needs none.
 #
 #   restore-trainrun --trainrun-path examples/trainrun_patchcore_cu3s.yaml \
 #       --plugins-dir <catalog holding cuvis_ai_dataloader.yaml + the patchcore manifest> --mode train
@@ -27,11 +29,6 @@ data:
     processing_mode: Reflectance
 
 # Phase 1 only: no gradient phase, nothing to unfreeze, no loss / metric nodes.
-training:
-  seed: 42
-  max_epochs: 1
-  accelerator: auto
-
 loss_nodes: []
 metric_nodes: []
 freeze_nodes: []
