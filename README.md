@@ -231,8 +231,8 @@ the same for every pixel, so on a 1000 x 1080 cube a stride-4 grid is 16 x cheap
 
 hparams: `GridSubsample` — `stride` 4 · `ScoreUpsample` — `mode` `bilinear` (or `bicubic`,
 `nearest`). Both are stateless and differentiable. A spectral branch, e.g. the builtin
-`SNVCorrection` and `GaussianMixtureClusterer` on the grid, then `ScoreUpsample`, then
-`ScoreRangeNormalizer(invert=true)` on the log-likelihood, gives a map that `ScoreMapFusion`
+`Standardize(axis="spectrum")` and `GaussianMixtureClusterer` on the grid, then `ScoreUpsample`,
+then `ScoreRangeNormalizer(invert=true)` on the log-likelihood, gives a map that `ScoreMapFusion`
 (`softmin`) can fuse with an image model's map.
 
 ## ScoreMapSuppression
