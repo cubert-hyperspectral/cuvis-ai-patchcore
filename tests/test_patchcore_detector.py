@@ -82,6 +82,49 @@ def test_golden_parity_with_reference_scoring():
         assert torch.allclose(out[i, ..., 0], ref, atol=1e-5), (out[i, ..., 0] - ref).abs().max()
 
 
+def _reference_distance_f64(flat: torch.Tensor, coreset: torch.Tensor) -> torch.Tensor:
+    """Exact nearest-coreset distance in float64, no matmul expansion."""
+    return torch.cdist(flat.double(), coreset.double()).min(dim=1).values
+
+
+def _old_matmul_cdist_distance(
+    flat: torch.Tensor, coreset: torch.Tensor, chunk_size: int
+) -> torch.Tensor:
+    """The distance formula ``_nearest_distance`` used before the numerics fix (pre-ALL-6819):
+    plain ``torch.cdist`` (matmul expansion) over the query chunk and the whole coreset, mirrored
+    here so the characterization test does not depend on the current implementation."""
+    out = torch.empty(flat.shape[0], dtype=torch.float32)
+    for i in range(0, flat.shape[0], chunk_size):
+        chunk = flat[i : i + chunk_size]
+        out[i : i + chunk.shape[0]] = torch.cdist(chunk, coreset).min(dim=1).values
+    return out
+
+
+def test_distance_matches_float64_reference_closely():
+    """Pins ``_nearest_distance`` against an exact float64 reference and against the pre-fix
+    matmul-cdist formula, on seeded data (the golden-parity fixture, seed 7).
+
+    Measured on this fixture: the pre-fix matmul-expansion distance (``_old_matmul_cdist_distance``)
+    is within ``8.94e-06`` of the float64 reference over both frames (96 queries total against a
+    40-row coreset). The current ``_nearest_distance`` must be at least as close to the float64
+    reference (asserted at ``atol=2e-5``, a safety margin above the measured pre-fix error) and
+    within ``atol=1e-4`` of the pre-fix values, since the fix changes only how the exact distance
+    is derived, not the feature pipeline that produces the query rows.
+    """
+    node = _fitted()
+    cube = torch.rand(2, H, W, C, generator=torch.Generator().manual_seed(7)) * 3.0 + 1.0
+    z = (cube - node.mu) / node.sd
+    pooled = node._pooled(z.permute(0, 3, 1, 2), node.stride)
+    flat = pooled.permute(0, 2, 3, 1).reshape(-1, C)
+
+    got = node._nearest_distance(flat)
+    ref = _reference_distance_f64(flat, node.coreset)
+    old = _old_matmul_cdist_distance(flat, node.coreset, node.chunk_size)
+
+    assert (got.double() - ref).abs().max() < 2e-5
+    assert torch.allclose(got, old, atol=1e-4), (got - old).abs().max()
+
+
 def test_pool_size_one_is_plain_per_pixel_nearest_distance():
     node = _fitted(pool_size=1, stride=1)
     cube = torch.rand(1, 9, 8, C, generator=torch.Generator().manual_seed(3))
