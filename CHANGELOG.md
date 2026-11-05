@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 0.4.0 - 2026-11-05
 
 ### Added
 - Declared the six Cubert-trained walnut foreign-object pipelines as `trained_pipeline` weight rows
