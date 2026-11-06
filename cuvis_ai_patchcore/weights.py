@@ -21,7 +21,7 @@ PLUGIN_NAME = "patchcore"
 """The manifest name of this plugin (what pipelines list under ``plugins:``)."""
 
 _WALNUT_REPO = "cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts"
-_WALNUT_REVISION = "e1629236014519c9535196f1d1905cbad5867a51"
+_WALNUT_REVISION = "f4b660aa1e2598ec4bc9354474c942bdbc485fe8"
 """The published commit of the walnut model repository (40 hex digits)."""
 
 _SHELL_AUX_FILES = (
@@ -76,10 +76,10 @@ WEIGHTS: tuple[PluginWeightEntry, ...] = (
         "walnut_best_refit",
         "Walnut foreign objects, refit (stand pick)",
         "Walnut foreign objects, refit banks, robust mask",
-        sha256="8ef10835d72f58cdd2e7d4e09a53e2eed5955d45cbf0891e71c8243b09c17e3f",
-        size_bytes=916_906_227,
-        yaml_size_bytes=8_753,
-        yaml_sha256="e41150ce0747ee913fa5ba8f1473d889dc6b45fd77d50c638bfff8aad0ba6ec9",
+        sha256="8f1771038e729849fe9241bd76b23e32f4c84da341b592fd6a4027d02b60005c",
+        size_bytes=916_907_547,
+        yaml_size_bytes=8_830,
+        yaml_sha256="9df82c67c688770ccb21258866b53ce38f780a7007e261ceb28b4e785788372f",
         description=(
             "Walnut foreign-object pipeline with the 1 October refit banks and the robust mask, "
             "the first choice at the production stand."
@@ -89,10 +89,10 @@ WEIGHTS: tuple[PluginWeightEntry, ...] = (
         "walnut_best_original",
         "Walnut foreign objects, original",
         "Walnut foreign objects, original banks, robust mask",
-        sha256="0b8812933b7585017afea2cf5558d3aa2aa6dbb1ce5e7044aa91e4c9b24062f5",
-        size_bytes=916_907_738,
-        yaml_size_bytes=8_757,
-        yaml_sha256="ba08d05e285eeca0cca8b651e6e8f786015279a52ce8d75c50bd050a7420d2a3",
+        sha256="81a311b1aa1c598c6dff78f280dc93dc6596a0b0d2c898106ab8346734aea350",
+        size_bytes=916_909_009,
+        yaml_size_bytes=8_834,
+        yaml_sha256="9c1c2c7de1738327d86f8893e70f579f3ae8e4f1d4f2c88e2187280c40fe2a54",
         description=(
             "Walnut foreign-object pipeline with the original banks and the robust mask, for "
             "lighting other than the production stand."
@@ -102,10 +102,10 @@ WEIGHTS: tuple[PluginWeightEntry, ...] = (
         "walnut_best_refit_cut",
         "Walnut foreign objects, refit, cut mask",
         "Refit banks, robust mask cut to the objects",
-        sha256="a1d3ef939263e9ee558cf810f86bb806053ac924dbe6662ca2bdc985f37dbc95",
-        size_bytes=916_908_007,
-        yaml_size_bytes=10_642,
-        yaml_sha256="ca858dc0b6bb1d2cd993c6ab2ac583a33f2ad260b8e53386c52ada1b1b18f469",
+        sha256="7110eb0f13011f2c6dca0a0197f75220ef27fe1a80dfababee95d040890055da",
+        size_bytes=916_909_347,
+        yaml_size_bytes=10_654,
+        yaml_sha256="a3239920f97b8caedcca4d2840ecfa70e2ee1372f7eefe41b3c8d6730417c94c",
         description=(
             "The refit walnut pipeline with the mask cut to the objects of the frame, for a "
             "tighter display at a small cost per frame."
@@ -115,10 +115,10 @@ WEIGHTS: tuple[PluginWeightEntry, ...] = (
         "walnut_best_original_cut",
         "Walnut foreign objects, original, cut mask",
         "Original banks, robust mask cut to the objects",
-        sha256="1966c03d2d0831bca1b195592bc4de86d6aed37f32a274bfa9b3e92a67fdb699",
-        size_bytes=916_909_582,
-        yaml_size_bytes=10_644,
-        yaml_sha256="0e124a0e812da2ea21f98a54c6eec3043fb41dd47d449235a94fbe442e4cddbe",
+        sha256="6460527319d97f3161e343cc70b19a880a8ec352cff7e9530dcc546c1880edf6",
+        size_bytes=916_910_873,
+        yaml_size_bytes=10_656,
+        yaml_sha256="ccb98a65ee406c65835ec419dd14e20ba42e97552f9cacce811f65545a8b74da",
         description=(
             "The original walnut pipeline with the mask cut to the objects of the frame, for a "
             "tighter display at a small cost per frame."
@@ -128,10 +128,10 @@ WEIGHTS: tuple[PluginWeightEntry, ...] = (
         "walnut_best_refit_shellaware",
         "Walnut foreign objects, refit, shell-aware",
         "Refit banks, FO map damped on segmented shells",
-        sha256="9283acf93e16de371e30a3ed9cf6e28c4c02410101669f3e92f6d1217d141ef0",
-        size_bytes=916_911_298,
-        yaml_size_bytes=8_968,
-        yaml_sha256="67b9de9503f38c82ebdcd7658bf17451e892e9739dea43cc2d7670831b414ce4",
+        sha256="9cb66ec53adb1d2b0eb6b1606f611bf76c151086ca11b8a225a2b4111fee0d47",
+        size_bytes=916_912_673,
+        yaml_size_bytes=9_037,
+        yaml_sha256="9fe7c9cb39d3afa152204f9978ff05c0cb94cf0efc2dee7db7330be2f4b8fb15",
         description=(
             "The refit walnut pipeline with the foreign-object map damped on the segmented "
             "shells, for stands where real shells next to a foreign object light up."
@@ -141,10 +141,10 @@ WEIGHTS: tuple[PluginWeightEntry, ...] = (
         "walnut_best_original_shellaware",
         "Walnut foreign objects, original, shell-aware",
         "Original banks, FO map damped on segmented shells",
-        sha256="6d32cadefa4d5f99cfaa00fca6ad8d9d3e866f9a65175cc1ab28446fa83775fa",
-        size_bytes=916_912_809,
-        yaml_size_bytes=8_944,
-        yaml_sha256="429179147ecf93a93be410a40a0d398932966791f8f8ce7e63ddd540e78a1524",
+        sha256="dd454509794914049275fc28da66b6a602f6a5a8e92a45dd471791154a0910f5",
+        size_bytes=916_914_135,
+        yaml_size_bytes=9_013,
+        yaml_sha256="d2224fe10f5988e12a7d4f696309a9925c7c96daf83db912b7b04010480e97fd",
         description=(
             "The original walnut pipeline with the foreign-object map damped on the segmented "
             "shells, for stands where real shells next to a foreign object light up."

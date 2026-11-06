@@ -11,6 +11,13 @@
   pipeline and its `.pt`; a pipeline that still names the old classes needs a 0.4.x release. There
   was no deprecation release. The plugin now ships `PatchCoreDetector` only.
 
+### Changed
+- The six walnut weight rows point at revision `f4b660aa` of
+  `cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts`, where the pipelines run on the cuvis-ai
+  built-ins (new `.pt` and yaml hashes). The repository is gated, as every `.pt` holds the original
+  SteerViT checkpoint that its authors mark for research use only, so `download-model` needs the
+  token of an account with access.
+
 ## 0.4.0 - 2026-11-05
 
 ### Added
