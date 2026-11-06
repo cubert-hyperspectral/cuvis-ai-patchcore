@@ -13,7 +13,7 @@ package_name: cuvis-ai-patchcore
 capabilities:
 - class_name: cuvis_ai_patchcore.node.patchcore.PatchCoreDetector
   category: model
-  tags: [anomaly, hyperspectral, stateful, torch]
+  tags: [anomaly, hyperspectral, onnx, stateful, torch]
   icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#4E7BD4\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <circle cx=\"14\" cy=\"20\" r=\"3\"/>\n  <circle cx=\"14\" cy=\"32\" r=\"3\"/>\n  <circle cx=\"14\" cy=\"44\" r=\"3\"/>\n  <circle cx=\"32\" cy=\"16\" r=\"3\"/>\n  <circle cx=\"32\" cy=\"32\" r=\"3\"/>\n  <circle cx=\"32\" cy=\"48\" r=\"3\"/>\n  <circle cx=\"50\" cy=\"26\" r=\"3\"/>\n  <circle cx=\"50\" cy=\"38\" r=\"3\"/>\n  <path d=\"M17 20l12-4M17 32l12-16M17 44l12-28\"/>\n  <path d=\"M17 20l12 12M17 32l12 0M17 44l12-12\"/>\n  <path d=\"M17 20l12 28M17 32l12 16M17 44l12 4\"/>\n  <path d=\"M35 16l12 10M35 32l12-6M35 48l12-22\"/>\n  <path d=\"M35 16l12 22M35 32l12 6M35 48l12-10\"/>\n</svg>\n"
   input_specs:
     cube:
@@ -38,329 +38,6 @@ capabilities:
       optional: false
       description: Image-level anomaly score [B] (mean of the top topk_frac pixel scores).
   doc_summary: Nearest-coreset distance anomaly detector on spectra or dense feature grids (PatchCore).
-- class_name: cuvis_ai_patchcore.node.fusion.ScoreMapFusion
-  category: transform
-  tags: [anomaly, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: Score maps [B, H, W, 1] of identical shape, one per inbound connection (fan-in); connect every detector's normalized map to this port.
-      variadic: true
-  output_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: Fused score map [B, H, W, 1] per ``mode``.
-  doc_summary: Fuse N score maps [B, H, W, 1] into one by a fixed elementwise rule (``mode``).
-- class_name: cuvis_ai_patchcore.node.calibration.ScoreRangeNormalizer
-  category: transform
-  tags: [anomaly, normalization, stateful, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Score maps [B, H, W, C] (anomaly maps: C = 1); C must equal n_channels.'
-  output_specs:
-    normalized:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Same shape: (x - p_low) / (p_high - p_low) per channel with the fitted normal-range percentiles, floored at 0 when `floor` is set, never clamped above.'
-  doc_summary: Map score maps onto their fitted normal range, (x - p_low) / (p_high - p_low), unclamped.
-- class_name: cuvis_ai_patchcore.node.gate.FrameScoreGate
-  category: transform
-  tags: [anomaly, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Display map [B, H, W, C] (a heatmap has C = 1): the map that is passed through or blanked, e.g. a fusion or normalized bank map.'
-    alarm_scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: true
-      description: Optional separate map [B, H, W, C] whose top-k frame score drives the gate. When omitted the gate scores `scores` itself. Use it to alarm on one bank (e.g. a feature bank) while displaying another map (e.g. a two-bank fusion).
-  output_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: "Same shape as `scores`: the display map when the frame's alarm score > threshold, else all zeros. With mode='mask' the passing frame is binarised (at `mask_threshold`, defaulting to `threshold`) instead of passed through."
-    frame_score:
-      dtype: float32
-      shape: [-1]
-      optional: false
-      description: Per-frame alarm score [B] = mean of the top `topk_frac` pixels of the alarm map (`alarm_scores` when given, else `scores`). Raw, before smoothing.
-    passed:
-      dtype: int32
-      shape: [-1]
-      optional: false
-      description: 'Per-frame gate [B]: 1 when the (optionally smoothed) score > threshold, else 0.'
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Boolean mask, same shape as `scores`: the pixels of the display map above `mask_threshold` (default `threshold`) on passing frames, all False on the others. Viewers show a `decisions` port as a mask overlay.'
-    core:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Boolean mask, same shape as `scores`: the pixels of the display map above `core_ratio` x `mask_threshold` on passing frames (equal to `decisions` with the default ratio 1): the confident core of the mask.'
-  doc_summary: Zero a display map unless its per-frame top-k score exceeds a threshold (heatmap or mask).
-- class_name: cuvis_ai_patchcore.node.fusion.DecisionFusion
-  category: transform
-  tags: [mask, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean masks [B, H, W, C] of identical shape, one per inbound connection (fan-in), e.g. the `decisions` of several gates.
-      variadic: true
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Fused mask [B, H, W, C] per ``mode``.
-  doc_summary: Fuse N boolean masks [B, H, W, C] into one by ``mode`` (any | all | first).
-- class_name: cuvis_ai_patchcore.node.fusion.MaskComposite
-  category: transform
-  tags: [mask, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean masks [B, H, W, C] of one batch, height and width, one per inbound connection (fan-in), in the order of `labels` / `levels`; a pixel of a mask counts as set where any of its channels is.
-      variadic: true
-  output_specs:
-    mask:
-      dtype: int32
-      shape: [-1, -1, -1]
-      optional: false
-      description: 'Label map [B, H, W]: 0 where no mask is set, else the largest `labels` entry among the masks set there.'
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: 'Level map [B, H, W, 1]: 0 where no mask is set, else the largest `levels` entry among the masks set there.'
-  doc_summary: Merge N boolean masks [B, H, W, C] into one label map and one level map for display.
-- class_name: cuvis_ai_patchcore.node.spatial.GridSubsample
-  category: transform
-  tags: [hyperspectral, preprocessing, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    cube:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Cube [B, H, W, C] (a hyperspectral cube or any per-pixel feature map).
-  output_specs:
-    cube:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: The grid [B, ceil(H / stride), ceil(W / stride), C], starting at pixel 0.
-  doc_summary: 'Keep every ``stride``-th pixel of a cube in both spatial axes: ``cube[:, ::s, ::s, :]``.'
-- class_name: cuvis_ai_patchcore.node.spatial.ScoreUpsample
-  category: transform
-  tags: [anomaly, postprocessing, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Score map [B, h, w, C] of a coarse grid (e.g. a GridSubsample branch).
-    reference:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Any tensor [B, H, W, *] of the target size; only its height and width are read (e.g. the full-resolution cube the grid was taken from).
-  output_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: The map resized to [B, H, W, C] (align_corners=False).
-  doc_summary: Resize a score map [B, h, w, C] to the height and width of a reference tensor.
-- class_name: cuvis_ai_patchcore.node.fusion.ScoreMapSuppression
-  category: transform
-  tags: [anomaly, mask, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: Score map [B, H, W, 1], e.g. a fused anomaly map.
-    mask:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: "Boolean mask [B, H, W, C] of the same batch, height and width: where the score map is suppressed (a pixel counts as set where any channel is), e.g. a segmenter's decisions for an object class that cannot be anomalous."
-  output_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: 'scores x (1 - weight x the eroded mask): unchanged outside the mask and within `erode_px` of its edge, scaled by 1 - weight inside.'
-  doc_summary: Down-weight a score map [B, H, W, 1] inside a boolean mask shrunk by ``erode_px``.
-- class_name: cuvis_ai_patchcore.node.temporal.MaskPersistence
-  category: transform
-  tags: [mask, postprocessing, stateful, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean mask [B, H, W, C] of consecutive frames (batch order is time order), e.g. a FrameScoreGate's decisions; each channel is filtered on its own.
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: "Same shape: the pixels of `decisions` with a set pixel of the previous frame's mask (same channel) within `radius_px`; all False on the first frame."
-  doc_summary: Keep the pixels of a boolean mask [B, H, W, C] that the previous frame's mask has nearby.
-- class_name: cuvis_ai_patchcore.node.morphology.MaskMinArea
-  category: transform
-  tags: [mask, numpy, postprocessing]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean mask [B, H, W, C], e.g. a FrameScoreGate's decisions; each frame and channel is filtered on its own.
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Same shape: the blobs of `decisions` with at least `min_area` pixels (8-connected).'
-  doc_summary: Drop the 8-connected blobs of a boolean mask [B, H, W, C] below ``min_area`` pixels.
-- class_name: cuvis_ai_patchcore.node.spatial.ScoreMapSmoothing
-  category: transform
-  tags: [anomaly, postprocessing, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Score map [B, H, W, C], e.g. a fused anomaly map.
-  output_specs:
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Same shape: each channel convolved with a normalised Gaussian of `sigma_px` (radius round(4 sigma), mirrored border).'
-  doc_summary: Smooth a score map [B, H, W, C] with a Gaussian of ``sigma_px`` pixels.
-- class_name: cuvis_ai_patchcore.node.morphology.MaskBlobGate
-  category: transform
-  tags: [mask, numpy, postprocessing]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean mask [B, H, W, C] whose blobs are gated, e.g. an anomaly mask.
-    mask:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: "Gating mask [B, H, W, C'] of the same batch, height and width (a pixel counts where any channel is set), e.g. a SpectralObjectMask: where objects are."
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Same shape as `decisions`: its 8-connected blobs that hold at least `min_px` pixels of `mask` (with `invert`: fewer than `min_px`).'
-  doc_summary: Keep the blobs of a boolean mask that hold enough pixels of a second (gating) mask.
-- class_name: cuvis_ai_patchcore.node.objectness.SpectralObjectMask
-  category: transform
-  tags: [hyperspectral, mask, segmentation, torch]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    cube:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Hyperspectral cube [B, H, W, C] (e.g. reflectance) whose background covers most of the frame.
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: "Object mask [B, H, W, 1]: spectral angle to the frame's median spectrum above the threshold (on the stride grid, nearest neighbour to H, W), filled and grown when `fill` / `dilate_px` are set."
-    angle:
-      dtype: float32
-      shape: [-1, -1, -1, 1]
-      optional: false
-      description: The angle in degrees on the stride grid [B, ceil(H / s), ceil(W / s), 1].
-  doc_summary: Mark the pixels whose spectral angle to the frame's median spectrum exceeds a threshold.
-- class_name: cuvis_ai_patchcore.node.objectness.MaskBlobFilter
-  category: transform
-  tags: [hyperspectral, mask, numpy, postprocessing]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean mask [B, H, W, C] whose blobs are filtered, e.g. a FrameScoreGate's decisions; each frame and channel on its own.
-    cube:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: true
-      description: Hyperspectral cube [B, H, W, K] of the same frames, for the object test; without it only the size test runs.
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Same shape: the blobs of `decisions` with at least `min_area` pixels that hold at least `min_object_px` pixels of non-background material.'
-  doc_summary: Keep the blobs of a boolean mask that are large enough and lie on non-background material.
-- class_name: cuvis_ai_patchcore.node.morphology.MaskPeakGate
-  category: transform
-  tags: [mask, numpy, postprocessing]
-  icon_svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"#6FAE5C\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M52 26a20 20 0 0 0-36 0\"/>\n  <path d=\"M52 16v10h-10\"/>\n  <path d=\"M12 38a20 20 0 0 0 36 0\"/>\n  <path d=\"M12 48v-10h10\"/>\n</svg>\n"
-  input_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean mask [B, H, W, C] whose blobs are kept or dropped, e.g. the pieces of a mask after a cut.
-    reference:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Boolean mask [B, H, W, C'] of the same batch, height and width (a pixel counts where any channel is set) whose blobs set the peak to reach, e.g. the mask before the cut.
-    scores:
-      dtype: float32
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: Score map [B, H, W, C''] the peaks are read from (the first channel), e.g. the anomaly map the mask was thresholded from; finite and positive where marked.
-  output_specs:
-    decisions:
-      dtype: bool
-      shape: [-1, -1, -1, -1]
-      optional: false
-      description: 'Same shape as `decisions`: the blobs whose highest score reaches `ratio` times the highest score of the reference blob they lie in; blobs outside every reference blob stay.'
-  doc_summary: Keep the blobs of a mask whose peak score reaches a share of their reference blob's peak.
 weights:
 - name: walnut_best_refit
   display_name: Walnut foreign objects, refit (stand pick)
@@ -369,11 +46,11 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_refit/walnut_best_refit.pt
-  revision: e1629236014519c9535196f1d1905cbad5867a51
-  sha256: 8ef10835d72f58cdd2e7d4e09a53e2eed5955d45cbf0891e71c8243b09c17e3f
-  size_bytes: 916906227
+  revision: f4b660aa1e2598ec4bc9354474c942bdbc485fe8
+  sha256: 8f1771038e729849fe9241bd76b23e32f4c84da341b592fd6a4027d02b60005c
+  size_bytes: 916907547
   aux_files:
-  - {path: walnut_best_refit/walnut_best_refit.yaml, size_bytes: 8753, sha256: e41150ce0747ee913fa5ba8f1473d889dc6b45fd77d50c638bfff8aad0ba6ec9}
+  - {path: walnut_best_refit/walnut_best_refit.yaml, size_bytes: 8830, sha256: 9df82c67c688770ccb21258866b53ce38f780a7007e261ceb28b4e785788372f}
   - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
   - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
   license: Apache-2.0
@@ -386,11 +63,11 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_original/walnut_best_original.pt
-  revision: e1629236014519c9535196f1d1905cbad5867a51
-  sha256: 0b8812933b7585017afea2cf5558d3aa2aa6dbb1ce5e7044aa91e4c9b24062f5
-  size_bytes: 916907738
+  revision: f4b660aa1e2598ec4bc9354474c942bdbc485fe8
+  sha256: 81a311b1aa1c598c6dff78f280dc93dc6596a0b0d2c898106ab8346734aea350
+  size_bytes: 916909009
   aux_files:
-  - {path: walnut_best_original/walnut_best_original.yaml, size_bytes: 8757, sha256: ba08d05e285eeca0cca8b651e6e8f786015279a52ce8d75c50bd050a7420d2a3}
+  - {path: walnut_best_original/walnut_best_original.yaml, size_bytes: 8834, sha256: 9c1c2c7de1738327d86f8893e70f579f3ae8e4f1d4f2c88e2187280c40fe2a54}
   - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
   - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
   license: Apache-2.0
@@ -403,11 +80,11 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_refit_cut/walnut_best_refit_cut.pt
-  revision: e1629236014519c9535196f1d1905cbad5867a51
-  sha256: a1d3ef939263e9ee558cf810f86bb806053ac924dbe6662ca2bdc985f37dbc95
-  size_bytes: 916908007
+  revision: f4b660aa1e2598ec4bc9354474c942bdbc485fe8
+  sha256: 7110eb0f13011f2c6dca0a0197f75220ef27fe1a80dfababee95d040890055da
+  size_bytes: 916909347
   aux_files:
-  - {path: walnut_best_refit_cut/walnut_best_refit_cut.yaml, size_bytes: 10642, sha256: ca858dc0b6bb1d2cd993c6ab2ac583a33f2ad260b8e53386c52ada1b1b18f469}
+  - {path: walnut_best_refit_cut/walnut_best_refit_cut.yaml, size_bytes: 10654, sha256: a3239920f97b8caedcca4d2840ecfa70e2ee1372f7eefe41b3c8d6730417c94c}
   - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
   - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
   license: Apache-2.0
@@ -420,11 +97,11 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_original_cut/walnut_best_original_cut.pt
-  revision: e1629236014519c9535196f1d1905cbad5867a51
-  sha256: 1966c03d2d0831bca1b195592bc4de86d6aed37f32a274bfa9b3e92a67fdb699
-  size_bytes: 916909582
+  revision: f4b660aa1e2598ec4bc9354474c942bdbc485fe8
+  sha256: 6460527319d97f3161e343cc70b19a880a8ec352cff7e9530dcc546c1880edf6
+  size_bytes: 916910873
   aux_files:
-  - {path: walnut_best_original_cut/walnut_best_original_cut.yaml, size_bytes: 10644, sha256: 0e124a0e812da2ea21f98a54c6eec3043fb41dd47d449235a94fbe442e4cddbe}
+  - {path: walnut_best_original_cut/walnut_best_original_cut.yaml, size_bytes: 10656, sha256: ccb98a65ee406c65835ec419dd14e20ba42e97552f9cacce811f65545a8b74da}
   - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
   - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
   license: Apache-2.0
@@ -437,11 +114,11 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_refit_shellaware/walnut_best_refit_shellaware.pt
-  revision: e1629236014519c9535196f1d1905cbad5867a51
-  sha256: 9283acf93e16de371e30a3ed9cf6e28c4c02410101669f3e92f6d1217d141ef0
-  size_bytes: 916911298
+  revision: f4b660aa1e2598ec4bc9354474c942bdbc485fe8
+  sha256: 9cb66ec53adb1d2b0eb6b1606f611bf76c151086ca11b8a225a2b4111fee0d47
+  size_bytes: 916912673
   aux_files:
-  - {path: walnut_best_refit_shellaware/walnut_best_refit_shellaware.yaml, size_bytes: 8968, sha256: 67b9de9503f38c82ebdcd7658bf17451e892e9739dea43cc2d7670831b414ce4}
+  - {path: walnut_best_refit_shellaware/walnut_best_refit_shellaware.yaml, size_bytes: 9037, sha256: 9fe7c9cb39d3afa152204f9978ff05c0cb94cf0efc2dee7db7330be2f4b8fb15}
   - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
   - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
   license: Apache-2.0
@@ -454,11 +131,11 @@ weights:
   kind: trained_pipeline
   repo_id: cubert-gmbh/Industrial_Foreign_Object_Detection_Walnuts
   filename: walnut_best_original_shellaware/walnut_best_original_shellaware.pt
-  revision: e1629236014519c9535196f1d1905cbad5867a51
-  sha256: 6d32cadefa4d5f99cfaa00fca6ad8d9d3e866f9a65175cc1ab28446fa83775fa
-  size_bytes: 916912809
+  revision: f4b660aa1e2598ec4bc9354474c942bdbc485fe8
+  sha256: dd454509794914049275fc28da66b6a602f6a5a8e92a45dd471791154a0910f5
+  size_bytes: 916914135
   aux_files:
-  - {path: walnut_best_original_shellaware/walnut_best_original_shellaware.yaml, size_bytes: 8944, sha256: 429179147ecf93a93be410a40a0d398932966791f8f8ce7e63ddd540e78a1524}
+  - {path: walnut_best_original_shellaware/walnut_best_original_shellaware.yaml, size_bytes: 9013, sha256: d2224fe10f5988e12a7d4f696309a9925c7c96daf83db912b7b04010480e97fd}
   - {path: weights/rgb_v2_ema.pth, size_bytes: 143694121, sha256: 9e6dcf4d1ac6d86e8520935e217145b904a702d66f6b4c161890234544fdebf8}
   - {path: weights/cir_v2_ema.pth, size_bytes: 143694121, sha256: 018d7714ef61219dc88bdf5507135cd8fc8034d55a0a84d38cece151005e0929}
   license: Apache-2.0

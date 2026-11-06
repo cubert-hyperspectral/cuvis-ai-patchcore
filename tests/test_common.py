@@ -1,11 +1,10 @@
-"""Shared node helpers: the top-k image score (one k rule for detector and gate), the topk_frac
-check, the seeded row cap and the Phase-1 guard."""
+"""Shared node helpers: the top-k image score, the topk_frac check, the seeded row cap, the
+Phase-1 guard and the TF32 switch."""
 
 from __future__ import annotations
 
 import pytest
 import torch
-from cuvis_ai_core.node.metric_utils import subsample_hw
 
 from cuvis_ai_patchcore.node._common import (
     check_topk_frac,
@@ -14,8 +13,6 @@ from cuvis_ai_patchcore.node._common import (
     tf32_matmul,
     topk_mean,
 )
-from cuvis_ai_patchcore.node.calibration import ScoreRangeNormalizer
-from cuvis_ai_patchcore.node.gate import FrameScoreGate
 from cuvis_ai_patchcore.node.patchcore import PatchCoreDetector
 
 pytestmark = pytest.mark.unit
@@ -38,17 +35,16 @@ def test_topk_mean_pools_every_non_batch_value_and_returns_float32():
     assert torch.equal(out, expected)
 
 
-def test_detector_anomaly_score_equals_gate_frame_score_on_its_map():
+def test_detector_anomaly_score_is_the_topk_mean_of_its_map():
     # 1160 x 25: rounding topk_frac * H * W in two steps (1.16 * 25) would lose a pixel (k = 28
-    # instead of 29); the shared rule rounds once, so a gate on the map reproduces the score.
+    # instead of 29); the shared rule rounds once, so topk_mean on the map reproduces the score.
     g = torch.Generator().manual_seed(1)
     node = PatchCoreDetector(
         input_channels=3, coreset_size=8, stride=1, bank_stride=1, max_bank_size=64
     )
     node.statistical_initialization(iter([{"cube": torch.rand(1, 6, 5, 3, generator=g)}]))
     out = node(cube=torch.rand(2, 6, 5, 3, generator=g), reference=torch.zeros(2, 1160, 25, 1))
-    gate = FrameScoreGate(threshold=0.0, topk_frac=node.topk_frac)
-    assert torch.equal(gate(scores=out["scores"])["frame_score"], out["anomaly_score"])
+    assert torch.equal(topk_mean(out["scores"], node.topk_frac), out["anomaly_score"])
     k = torch.topk(out["scores"].reshape(2, -1), 29, dim=1).values.mean(dim=1)
     assert torch.equal(out["anomaly_score"], k)
 
@@ -82,18 +78,13 @@ def test_random_cap_draws_a_seeded_subset_without_repeats():
 
 
 def test_require_fitted_names_the_node_until_phase_1():
-    node = ScoreRangeNormalizer()
-    with pytest.raises(RuntimeError, match="ScoreRangeNormalizer requires statistical_init"):
+    node = PatchCoreDetector(
+        input_channels=3, coreset_size=8, stride=1, bank_stride=1, max_bank_size=64
+    )
+    with pytest.raises(RuntimeError, match="PatchCoreDetector requires statistical_init"):
         require_fitted(node)
-    node.statistical_initialization(iter([{"scores": torch.rand(1, 8, 8, 1)}]))
+    node.statistical_initialization(iter([{"cube": torch.rand(1, 6, 5, 3)}]))
     require_fitted(node)
-
-
-@pytest.mark.parametrize("stride", [1, 2, 3, 4])
-def test_core_subsample_matches_the_strided_slice(stride):
-    # ScoreRangeNormalizer thins its Phase-1 values with core's subsample_hw; pin it to the slice
-    x = torch.rand(2, 11, 9, 3, generator=torch.Generator().manual_seed(stride))
-    assert torch.equal(subsample_hw(x, stride), x[:, ::stride, ::stride, :])
 
 
 def test_tf32_matmul_sets_and_restores_the_precision_also_on_error():
