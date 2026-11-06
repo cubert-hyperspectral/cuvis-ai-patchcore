@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Removed
+- Removed the fourteen score, mask and gate nodes (`ScoreRangeNormalizer`, `ScoreMapFusion`,
+  `DecisionFusion`, `MaskComposite`, `ScoreMapSuppression`, `FrameScoreGate`, `GridSubsample`,
+  `ScoreUpsample`, `ScoreMapSmoothing`, `MaskMinArea`, `MaskBlobGate`, `MaskPeakGate`,
+  `MaskBlobFilter`, `SpectralObjectMask`), which are cuvis-ai built-ins since cuvis-ai 0.19.1, and
+  `MaskPersistence`, which only superseded presets used. cuvis-ai's `migrate-plugin-nodes` rewrites a
+  pipeline and its `.pt`; a pipeline that still names the old classes needs a 0.4.x release. There
+  was no deprecation release. The plugin now ships `PatchCoreDetector` only.
+
 ## 0.4.0 - 2026-11-05
 
 ### Added
