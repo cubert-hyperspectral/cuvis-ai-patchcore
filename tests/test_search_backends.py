@@ -125,13 +125,14 @@ def test_coreset_signature_distinguishes_equal_version_different_buffers():
 
 
 class _FakeTurbovecIndex:
-    """Deterministic stand-in for turbovec.TurboQuantIndex: returns fixed candidate ids per query
-    row, independent of the actual vector content, so the plumbing can be tested without the real
-    dependency installed."""
+    """Deterministic stand-in for turbovec.TurboQuantIndex: returns fixed candidate ids (and,
+    optionally, fixed scores) per query row, independent of the actual vector content, so the
+    plumbing can be tested without the real dependency installed."""
 
-    def __init__(self, n_rows: int, fixed_ids):
+    def __init__(self, n_rows: int, fixed_ids, fixed_scores=None):
         self._n_rows = n_rows
         self._fixed_ids = fixed_ids
+        self._fixed_scores = fixed_scores
 
     def __len__(self):
         return self._n_rows
@@ -141,7 +142,10 @@ class _FakeTurbovecIndex:
 
         n = queries.shape[0]
         ids = np.tile(np.array(self._fixed_ids[:k], dtype=np.int64), (n, 1))
-        scores = np.zeros((n, k), dtype=np.float32)
+        if self._fixed_scores is not None:
+            scores = np.tile(np.array(self._fixed_scores[:k], dtype=np.float32), (n, 1))
+        else:
+            scores = np.zeros((n, k), dtype=np.float32)
         return scores, ids
 
 
@@ -151,7 +155,7 @@ def test_turbovec_shortlist_returns_fixed_candidate_ids():
         index=fake_index, norms=torch.ones(10), signature=(10, torch.float32, 4, 0, 0, 0)
     )
     flat = torch.randn(5, 4)
-    ids = turbovec_shortlist(state, flat, shortlist_size=3, eps=1e-6)
+    ids, _scores = turbovec_shortlist(state, flat, shortlist_size=3, eps=1e-6)
     assert ids.shape == (5, 3)
     assert ids.dtype == torch.int64
     for row in ids:
@@ -164,8 +168,21 @@ def test_turbovec_shortlist_clips_k_to_index_size():
         index=fake_index, norms=torch.ones(2), signature=(2, torch.float32, 4, 0, 0, 0)
     )
     flat = torch.randn(3, 4)
-    ids = turbovec_shortlist(state, flat, shortlist_size=8, eps=1e-6)
+    ids, scores = turbovec_shortlist(state, flat, shortlist_size=8, eps=1e-6)
     assert ids.shape == (3, 2)  # clipped to the 2 coreset rows
+    assert scores.shape == (3, 2)
+
+
+def test_turbovec_shortlist_returns_the_index_own_scores_not_recomputed():
+    """The scores returned alongside ids are exactly what the index's search() gave back, not a
+    cosine recomputed from the coreset rows."""
+    fake_index = _FakeTurbovecIndex(n_rows=4, fixed_ids=[0, 1], fixed_scores=[0.42, -0.17])
+    state = TurbovecIndexState(
+        index=fake_index, norms=torch.ones(4), signature=(4, torch.float32, 4, 0, 0, 0)
+    )
+    flat = torch.randn(2, 4)
+    _ids, scores = turbovec_shortlist(state, flat, shortlist_size=2, eps=1e-6)
+    assert torch.allclose(scores, torch.tensor([[0.42, -0.17], [0.42, -0.17]]))
 
 
 # ----- no-rescore reconstruction formula ---------------------------------------------------------

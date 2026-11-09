@@ -366,19 +366,23 @@ class PatchCoreDetector(Node):
         return self._turbovec_state
 
     def _turbovec_shortlist_and_rescore(self, flat: Tensor) -> Tensor:
-        """turbovec cosine shortlist, then exact rescore or norm-reconstructed distance."""
+        """turbovec cosine shortlist, then exact rescore or norm-reconstructed distance.
+
+        ``rescore=False`` never gathers the fp32 coreset rows: it reconstructs the distance from
+        the index's own approximate cosine (returned alongside the shortlisted ids) and the
+        coreset's exact norms, cached when the index was built.
+        """
         state = self._ensure_turbovec_index()
-        ids = turbovec_shortlist(state, flat, self.shortlist_size, self.eps).to(flat.device)
-        candidates = self.coreset[ids]  # [N, k, C]
+        ids, cos = turbovec_shortlist(state, flat, self.shortlist_size, self.eps)
+        ids = ids.to(flat.device)
         if self.rescore:
+            candidates = self.coreset[ids]  # [N, k, C]
             diff = flat.unsqueeze(1) - candidates
             return diff.norm(dim=2).min(dim=1).values
 
+        cos = cos.to(flat.device)
         query_norms = flat.norm(dim=-1)  # [N]
-        q_norm_safe = query_norms.clamp_min(self.eps).unsqueeze(1)  # [N, 1]
         cand_norms = state.norms.to(flat.device)[ids]  # [N, k]
-        cand_norm_safe = cand_norms.clamp_min(self.eps)
-        cos = (flat.unsqueeze(1) * candidates).sum(dim=-1) / (q_norm_safe * cand_norm_safe)
         dist, _n_clamped = reconstruct_cosine_distance(
             query_norms.unsqueeze(1).expand_as(cos), cand_norms, cos
         )

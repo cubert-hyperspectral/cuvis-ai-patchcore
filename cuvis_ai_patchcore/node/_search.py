@@ -136,17 +136,21 @@ def build_turbovec_index(
 
 def turbovec_shortlist(
     state: TurbovecIndexState, flat: Tensor, shortlist_size: int, eps: float
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     """Top ``shortlist_size`` coreset row ids per query row by approximate cosine similarity.
 
-    Returns a ``[N, k]`` int64 tensor of coreset row indices (``k = min(shortlist_size,
-    n_coreset_rows)``), on the CPU: the caller gathers fp32 rows back on the query device.
+    Returns ``(ids, scores)``, both ``[N, k]`` on the CPU (``k = min(shortlist_size,
+    n_coreset_rows)``): ``ids`` is int64 coreset row indices, for the caller to gather fp32 rows
+    back on the query device when rescoring exactly; ``scores`` is the index's own float32
+    similarity for each returned row, the approximate cosine between the query and that coreset
+    row (both sides are unit-normalised before being added to or searched against the index), to
+    reuse directly when the caller does not rescore.
     """
     unit, _ = _unit_normalize(flat.detach().to("cpu", dtype=torch.float32), eps)
     padded = _pad_to_multiple_of_8(unit).contiguous().numpy()
     k = min(shortlist_size, len(state.index))
-    _scores, ids = state.index.search(padded, k)
-    return torch.from_numpy(ids).to(torch.int64)
+    scores, ids = state.index.search(padded, k)
+    return torch.from_numpy(ids).to(torch.int64), torch.from_numpy(scores).to(torch.float32)
 
 
 def reconstruct_cosine_distance(

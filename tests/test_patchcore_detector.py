@@ -515,11 +515,12 @@ def test_turbovec_rescore_matches_exact_on_a_small_synthetic_bank():
 
 
 def test_turbovec_no_rescore_uses_hand_checked_formula_on_known_vectors():
-    """With rescore=False, the reported distance comes from the norm-reconstruction formula, not
-    the true Euclidean distance. This test pins it on a tiny bank where the shortlist always
-    covers every row (k == n_coreset_rows), so the only approximation left is the formula's own
-    cosine input versus the exact cosine, checked here with a tolerance that catches a wrong
-    formula while allowing turbovec's own quantisation error."""
+    """With rescore=False, the reported distance comes from the norm-reconstruction formula fed
+    by the index's own quantised cosine score, not the true Euclidean distance and not a cosine
+    recomputed from the coreset rows. This test pins it on a tiny bank where the shortlist always
+    covers every row (k == n_coreset_rows), so the only approximation left is the index's own
+    cosine versus the exact one, checked here with a tolerance that catches a wrong formula while
+    allowing turbovec's own quantisation error."""
     node = PatchCoreDetector(
         input_channels=2,
         coreset_size=4,
@@ -539,6 +540,88 @@ def test_turbovec_no_rescore_uses_hand_checked_formula_on_known_vectors():
     out = node(cube=query)["scores"][0, 0, 0, 0]
     exact = torch.cdist(torch.tensor([[5.0, 0.0]]), bank).min().item()
     assert out.item() == pytest.approx(exact, abs=0.25)  # quantised cosine, not exact
+
+
+class _FixedScoreIndex:
+    """Wraps a real turbovec index but returns caller-chosen scores for every query, so a test
+    can tell whether the node used the index's own score or recomputed one from gathered rows."""
+
+    def __init__(self, real_index, fixed_scores):
+        self._real_index = real_index
+        self._fixed_scores = fixed_scores
+
+    def __len__(self):
+        return len(self._real_index)
+
+    def search(self, queries, k):
+        import numpy as np
+
+        _real_scores, ids = self._real_index.search(queries, k)
+        n = queries.shape[0]
+        scores = np.tile(np.array(self._fixed_scores[:k], dtype=np.float32), (n, 1))
+        return scores, ids
+
+
+def test_turbovec_no_rescore_follows_the_index_own_score_not_the_exact_cosine():
+    """rescore=False must use the index's own (possibly approximate) score, not an exact cosine
+    recomputed from the gathered coreset rows: a fake score that disagrees with the true cosine
+    must show up in the reported distance."""
+    node = PatchCoreDetector(
+        input_channels=2,
+        coreset_size=4,
+        stride=1,
+        bank_stride=1,
+        pool_size=1,
+        max_bank_size=4,
+        standardize=False,
+        search_backend="turbovec",
+        search_bit_width=4,
+        shortlist_size=4,
+        rescore=False,
+    )
+    bank = torch.tensor([[3.0, 4.0], [0.0, 5.0], [-3.0, 4.0], [1.0, 0.0]])
+    node.statistical_initialization(iter([{"cube": bank.reshape(1, 4, 1, 2)}]))
+    query = torch.tensor([[5.0, 0.0]]).reshape(1, 1, 1, 2)
+
+    real_index = node._turbovec_state.index
+    node._turbovec_state.index = _FixedScoreIndex(real_index, fixed_scores=[1.0, 1.0, 1.0, 1.0])
+    out_perfect_cos = node(cube=query)["scores"][0, 0, 0, 0].item()
+
+    node._turbovec_state.index = _FixedScoreIndex(real_index, fixed_scores=[-1.0, -1.0, -1.0, -1.0])
+    out_worst_cos = node(cube=query)["scores"][0, 0, 0, 0].item()
+
+    assert out_perfect_cos != pytest.approx(out_worst_cos)
+    # cos=1 reconstructs to |q - c|; cos=-1 reconstructs to |q| + |c|, strictly larger here.
+    assert out_perfect_cos < out_worst_cos
+
+
+def test_turbovec_no_rescore_never_gathers_coreset_rows():
+    """Poisoning the coreset rows with NaN after the index is built must not reach a rescore=False
+    result: that path has no reason to read self.coreset at all."""
+    node = PatchCoreDetector(
+        input_channels=2,
+        coreset_size=4,
+        stride=1,
+        bank_stride=1,
+        pool_size=1,
+        max_bank_size=4,
+        standardize=False,
+        search_backend="turbovec",
+        search_bit_width=4,
+        shortlist_size=4,
+        rescore=False,
+    )
+    bank = torch.tensor([[3.0, 4.0], [0.0, 5.0], [-3.0, 4.0], [1.0, 0.0]])
+    node.statistical_initialization(iter([{"cube": bank.reshape(1, 4, 1, 2)}]))
+    query = torch.tensor([[5.0, 0.0]]).reshape(1, 1, 1, 2)
+    node(cube=query)  # build the index once over the real bank
+
+    # Poison the buffer's content without bumping the version counter or changing its identity
+    # (.data bypasses autograd tracking), so the cache still considers the index fresh: a
+    # rescore=False forward must not gather these rows regardless.
+    node.coreset.data.copy_(torch.full_like(node.coreset, float("nan")))
+    out = node(cube=query)["scores"]
+    assert torch.isfinite(out).all()
 
 
 def test_turbovec_pads_61_channel_bank_to_64():
