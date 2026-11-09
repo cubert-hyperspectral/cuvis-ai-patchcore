@@ -116,7 +116,7 @@ def turbovec_shortlist(
 
 def reconstruct_cosine_distance(
     query_norms: Tensor, candidate_norms: Tensor, cos_sim: Tensor
-) -> tuple[Tensor, Tensor]:
+) -> tuple[Tensor, int]:
     """Euclidean distance reconstructed from norms and an approximate cosine similarity.
 
     ``d = sqrt(max(0, |q|^2 + |c|^2 - 2|q||c|cos))``, with ``cos`` clamped to ``[-1, 1]`` first
