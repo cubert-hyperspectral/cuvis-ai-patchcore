@@ -624,6 +624,39 @@ def test_turbovec_no_rescore_never_gathers_coreset_rows():
     assert torch.isfinite(out).all()
 
 
+@pytest.mark.parametrize("rescore", [True, False])
+def test_turbovec_rescore_is_chunked_like_the_exact_backend(rescore):
+    """The turbovec path must bound its candidate gather by chunk_size, the same way the exact
+    path already does, instead of gathering the whole batch's shortlist at once."""
+    kw = {**FIT_KW, "coreset_size": 16, "max_bank_size": 200, "shortlist_size": 4}
+    big = _fitted(**kw, search_backend="turbovec", rescore=rescore, chunk_size=4096)
+    small = _fitted(**kw, search_backend="turbovec", rescore=rescore, chunk_size=7)
+    assert torch.equal(big.coreset, small.coreset)
+    cube = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(7)) * 3 + 1
+
+    out_big = big(cube=cube)["scores"]
+    max_gather_rows = 0
+    original_getitem = torch.Tensor.__getitem__
+
+    def spying_getitem(self, index):
+        nonlocal max_gather_rows
+        result = original_getitem(self, index)
+        if self is small.coreset and isinstance(index, torch.Tensor) and index.ndim == 2:
+            max_gather_rows = max(max_gather_rows, index.shape[0])
+        return result
+
+    torch.Tensor.__getitem__ = spying_getitem
+    try:
+        out_small = small(cube=cube)["scores"]
+    finally:
+        torch.Tensor.__getitem__ = original_getitem
+
+    assert torch.allclose(out_big, out_small, atol=1e-4), (out_big - out_small).abs().max()
+    assert max_gather_rows <= small.chunk_size
+    if rescore:
+        assert max_gather_rows > 0  # the spy actually observed a coreset[ids]-style gather
+
+
 def test_turbovec_pads_61_channel_bank_to_64():
     node = PatchCoreDetector(
         input_channels=61,

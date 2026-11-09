@@ -368,25 +368,33 @@ class PatchCoreDetector(Node):
     def _turbovec_shortlist_and_rescore(self, flat: Tensor) -> Tensor:
         """turbovec cosine shortlist, then exact rescore or norm-reconstructed distance.
 
-        ``rescore=False`` never gathers the fp32 coreset rows: it reconstructs the distance from
-        the index's own approximate cosine (returned alongside the shortlisted ids) and the
-        coreset's exact norms, cached when the index was built.
+        Chunked by ``chunk_size`` query rows at a time, like the exact backend: the shortlist and
+        the rescore step both run per chunk, so the candidate tensor never covers more than
+        ``chunk_size`` query rows regardless of the batch's total size. ``rescore=False`` never
+        gathers the fp32 coreset rows: it reconstructs the distance from the index's own
+        approximate cosine (returned alongside the shortlisted ids) and the coreset's exact norms,
+        cached when the index was built.
         """
         state = self._ensure_turbovec_index()
-        ids, cos = turbovec_shortlist(state, flat, self.shortlist_size, self.eps)
-        ids = ids.to(flat.device)
-        if self.rescore:
-            candidates = self.coreset[ids]  # [N, k, C]
-            diff = flat.unsqueeze(1) - candidates
-            return diff.norm(dim=2).min(dim=1).values
+        out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
+        for i in range(0, flat.shape[0], self.chunk_size):
+            chunk = flat[i : i + self.chunk_size]
+            ids, cos = turbovec_shortlist(state, chunk, self.shortlist_size, self.eps)
+            ids = ids.to(flat.device)
+            if self.rescore:
+                candidates = self.coreset[ids]  # [chunk, k, C]
+                diff = chunk.unsqueeze(1) - candidates
+                out[i : i + chunk.shape[0]] = diff.norm(dim=2).min(dim=1).values
+                continue
 
-        cos = cos.to(flat.device)
-        query_norms = flat.norm(dim=-1)  # [N]
-        cand_norms = state.norms.to(flat.device)[ids]  # [N, k]
-        dist, _n_clamped = reconstruct_cosine_distance(
-            query_norms.unsqueeze(1).expand_as(cos), cand_norms, cos
-        )
-        return dist.min(dim=1).values
+            cos = cos.to(flat.device)
+            query_norms = chunk.norm(dim=-1)  # [chunk]
+            cand_norms = state.norms.to(flat.device)[ids]  # [chunk, k]
+            dist, _n_clamped = reconstruct_cosine_distance(
+                query_norms.unsqueeze(1).expand_as(cos), cand_norms, cos
+            )
+            out[i : i + chunk.shape[0]] = dist.min(dim=1).values
+        return out
 
     def _nearest_distance(self, flat: Tensor) -> Tensor:
         """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row.
