@@ -358,7 +358,7 @@ class PatchCoreDetector(Node):
         """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row.
 
         Shortlists ``shortlist_size`` candidate rows per query (exactly, via ``torch.cdist``'s
-        matmul expansion, or approximately, via a turbovec cosine search — see
+        matmul expansion, or approximately, via a turbovec cosine search, see
         ``search_backend``), then either rescores the shortlist's exact fp32 distance
         (``rescore=True``) or reconstructs a distance from the approximate cosine and the exact
         row norms (``rescore=False``, turbovec only).

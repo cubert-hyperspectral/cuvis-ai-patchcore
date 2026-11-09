@@ -518,7 +518,7 @@ def test_turbovec_no_rescore_uses_hand_checked_formula_on_known_vectors():
     """With rescore=False, the reported distance comes from the norm-reconstruction formula, not
     the true Euclidean distance. This test pins it on a tiny bank where the shortlist always
     covers every row (k == n_coreset_rows), so the only approximation left is the formula's own
-    cosine input versus the exact cosine — checked here with a tolerance that catches a wrong
+    cosine input versus the exact cosine, checked here with a tolerance that catches a wrong
     formula while allowing turbovec's own quantisation error."""
     node = PatchCoreDetector(
         input_channels=2,
@@ -598,7 +598,7 @@ def test_turbovec_backend_builds_eagerly_after_statistical_initialization():
 
 def test_turbovec_backend_builds_lazily_as_a_fallback_without_prepare_inference():
     """A node whose coreset arrives through load_state_dict alone (no fit, no prepare_inference
-    call — the restore path a Node base without the hook would leave it in) still builds the
+    call: the restore path a Node base without the hook would leave it in) still builds the
     index the first time it is needed, as a fallback."""
     fitted = _fitted(search_backend="turbovec", coreset_size=16, max_bank_size=200)
     restored = PatchCoreDetector(

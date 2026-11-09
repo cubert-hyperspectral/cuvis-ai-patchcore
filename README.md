@@ -45,7 +45,7 @@ Requires `cuvis-ai-core >= 0.17.4` and `cuvis-ai-schemas >= 0.12.0` on Python 3.
 | `coreset_projection` | `null` | `null` selects the coreset on exact distances; `sparse_random` runs anomalib's sparse random projection (Johnson-Lindenstrauss dimension for `projection_eps`) before k-center greedy, i.e. anomalib's `KCenterGreedy` recipe. Only the row selection changes; scoring always uses the original features |
 | `projection_eps` | 0.9 | JL distortion parameter of the projection (anomalib default) |
 | `eps` | 1e-6 | floor for the per-band standard deviation |
-| `search_backend` | `exact` | `exact` shortlists nearest-coreset candidates through `torch.cdist`'s matmul expansion (today's behaviour, unchanged); `turbovec` shortlists through an approximate cosine search over a quantised coreset copy — see [Search backend](#search-backend) |
+| `search_backend` | `exact` | `exact` shortlists nearest-coreset candidates through `torch.cdist`'s matmul expansion (today's behaviour, unchanged); `turbovec` shortlists through an approximate cosine search over a quantised coreset copy; see [Search backend](#search-backend) |
 | `search_bit_width` | 4 | turbovec quantisation width, `2` or `4`; only used with `search_backend: turbovec` |
 | `shortlist_size` | 8 | candidate rows kept per query before rescoring, both backends; clipped to the number of coreset rows |
 | `rescore` | `true` | recompute the exact fp32 distance over the shortlist; `false` reconstructs a distance from the approximate cosine and the exact row norms instead (only with `search_backend: turbovec`) |
@@ -84,7 +84,7 @@ quantised, unit-normalised copy of the coreset, built on the CPU with the option
 dependency (`uv pip install cuvis-ai-patchcore[turbovec]`). Cosine ranking is **not** the same as
 the Euclidean ranking PatchCore scores on: two coreset rows with different norms can rank
 differently by angle than by distance, so a turbovec-configured node should be validated against
-the `exact` backend on representative data before deployment — it is a candidate shortlisting
+the `exact` backend on representative data before deployment: it is a candidate shortlisting
 step, not a drop-in replacement, and its recall depends on how anisotropic the feature norms are.
 `rescore: true` keeps the reported distance exact for every row that made the shortlist (only the
 *candidate set* is approximate); `rescore: false` skips gathering the fp32 rows and instead
