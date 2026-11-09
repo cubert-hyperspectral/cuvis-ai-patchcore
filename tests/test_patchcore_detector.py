@@ -585,6 +585,47 @@ def test_turbovec_index_rebuilt_after_coreset_content_change():
     assert node._turbovec_state.index is not first_index
 
 
+def test_turbovec_index_rebuilds_after_assign_true_load_with_matching_version():
+    """load_state_dict(..., assign=True) installs a brand new coreset tensor object whose version
+    counter can coincidentally match the cached one (both fresh buffers mutated exactly once).
+    The signature must still tell the two apart, so the index is rebuilt over the new bank
+    instead of silently searching the old one."""
+    kw = {**FIT_KW, "coreset_size": 16, "max_bank_size": 200}
+    node_a = _fitted(**kw, search_backend="turbovec", seed=0)
+    node_b = _fitted(**kw, search_backend="turbovec", seed=99)
+    assert not torch.allclose(node_a.coreset, node_b.coreset)
+
+    cube = _stream(1, seed=3)[0]["cube"]
+    node_a(cube=cube)  # builds the index over bank A
+
+    node_a.load_state_dict(node_b.state_dict(), assign=True)
+    assert node_a.coreset is not node_b.coreset  # a third, freshly assigned tensor
+    assert node_a.coreset._version == node_b.coreset._version  # the collision this guards against
+
+    node_a.prepare_inference()
+    out_a = node_a(cube=cube)["scores"]
+
+    reference = PatchCoreDetector(**kw, search_backend="turbovec")
+    reference.load_state_dict(node_b.state_dict())
+    out_ref = reference(cube=cube)["scores"]
+    assert torch.allclose(out_a, out_ref, atol=1e-4)
+
+
+def test_turbovec_detector_builds_and_scores_under_inference_mode():
+    """Constructing and loading a turbovec detector inside torch.inference_mode() must not make
+    the coreset signature unreadable: coreset._version raises on an inference tensor."""
+    kw = {**FIT_KW, "coreset_size": 16, "max_bank_size": 200}
+    fitted = _fitted(**kw, search_backend="turbovec")
+    cube = _stream(1, seed=3)[0]["cube"]
+
+    with torch.inference_mode():
+        node = PatchCoreDetector(**kw, search_backend="turbovec")
+        node.load_state_dict(fitted.state_dict())
+        node.prepare_inference()
+        out = node(cube=cube)["scores"]
+    assert torch.isfinite(out).all()
+
+
 def test_turbovec_backend_builds_eagerly_after_statistical_initialization():
     """statistical_initialization() builds the index right away (Phase 1 is interactive; the
     first inference call should not pay the index-build cost)."""

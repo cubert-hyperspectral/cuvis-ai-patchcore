@@ -38,6 +38,9 @@ def _unit_normalize(rows: Tensor, eps: float) -> tuple[Tensor, Tensor]:
     return rows / safe, norms.squeeze(-1)
 
 
+_VERSION_UNREADABLE = -1  # sentinel: an inference tensor's _version cannot be read
+
+
 @dataclass
 class TurbovecIndexState:
     """CPU-resident turbovec index plus the bookkeeping needed to keep it in sync with a coreset.
@@ -48,14 +51,41 @@ class TurbovecIndexState:
 
     index: Any
     norms: Tensor  # [N] exact (unpadded) coreset row norms, CPU float32
-    signature: tuple[int, torch.dtype, int, int]  # (n_rows, dtype, n_dims, coreset._version)
+    signature: tuple[int, torch.dtype, int, int, int, int]  # see _coreset_signature
 
-    def matches(self, coreset: Tensor) -> bool:
-        return self.signature == _coreset_signature(coreset)
+    def matches(self, coreset: Tensor, generation: int) -> bool:
+        return self.signature == _coreset_signature(coreset, generation)
 
 
-def _coreset_signature(coreset: Tensor) -> tuple[int, torch.dtype, int, int]:
-    return (coreset.shape[0], coreset.dtype, coreset.shape[1], coreset._version)
+def _coreset_signature(
+    coreset: Tensor, generation: int
+) -> tuple[int, torch.dtype, int, int, int, int]:
+    """Cache key for a coreset buffer: shape, dtype, the node's own replacement generation, a
+    version read (best-effort) and the buffer's storage address.
+
+    ``generation`` is bumped by the node itself whenever it replaces or refits the coreset
+    (including an ``assign=True`` state-dict load, which swaps in a new tensor object), so two
+    different buffers of the same shape never share a signature even if torch's own version
+    counter happens to coincide (two freshly-fitted tensors each mutated once both read version
+    1). The buffer's ``data_ptr`` is included too, since a future caller that mutates ``coreset``
+    directly (bypassing the node's own bookkeeping) is still caught by the storage address or the
+    version even without a generation bump. ``_version`` is torch's private autograd counter and
+    is unreadable on an inference tensor (``torch.inference_mode()``); that case reads as a
+    constant sentinel instead of raising, which forces a rebuild on every call while such a
+    tensor is in use rather than crashing or trusting a stale index.
+    """
+    try:
+        version = coreset._version
+    except RuntimeError:
+        version = _VERSION_UNREADABLE
+    return (
+        coreset.shape[0],
+        coreset.dtype,
+        coreset.shape[1],
+        generation,
+        version,
+        coreset.data_ptr(),
+    )
 
 
 def _import_turbovec() -> Any:
@@ -83,12 +113,15 @@ def validate_search_hparams(
         raise ValueError(f"shortlist_size must be >= 1, got {shortlist_size}")
 
 
-def build_turbovec_index(coreset: Tensor, bit_width: int, eps: float) -> TurbovecIndexState:
+def build_turbovec_index(
+    coreset: Tensor, bit_width: int, eps: float, generation: int
+) -> TurbovecIndexState:
     """Build a CPU turbovec index from the current coreset rows.
 
     Rows are moved to the CPU, zero-padded to a multiple of 8 channels, unit-normalised and added
     to a fresh index; their exact (unpadded) norms are cached alongside it for rescoring and for
-    the no-rescore reconstruction formula.
+    the no-rescore reconstruction formula. ``generation`` is the node's own coreset-replacement
+    counter, folded into the cached signature; see ``_coreset_signature``.
     """
     turbovec = _import_turbovec()
     cpu_coreset = coreset.detach().to("cpu", dtype=torch.float32)
@@ -96,7 +129,9 @@ def build_turbovec_index(coreset: Tensor, bit_width: int, eps: float) -> Turbove
     padded = _pad_to_multiple_of_8(unit).contiguous().numpy()
     index = turbovec.TurboQuantIndex(dim=padded.shape[1], bit_width=bit_width)
     index.add(padded)
-    return TurbovecIndexState(index=index, norms=norms, signature=_coreset_signature(coreset))
+    return TurbovecIndexState(
+        index=index, norms=norms, signature=_coreset_signature(coreset, generation)
+    )
 
 
 def turbovec_shortlist(

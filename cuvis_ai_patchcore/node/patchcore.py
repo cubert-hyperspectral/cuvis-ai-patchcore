@@ -33,6 +33,7 @@ eagerly-sized buffers, so ``state_dict`` round-trips through the pipeline ``.pt`
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -270,6 +271,27 @@ class PatchCoreDetector(Node):
         # Lazily built turbovec index; never part of the persisted state (see _search.py and the
         # README). None until the first build, by prepare_inference() or lazily in forward().
         self._turbovec_state: Any = None
+        # Bumped every time the coreset buffer is replaced or refit (statistical_initialization,
+        # load_state_dict including assign=True); folded into the turbovec cache key so a
+        # same-shape replacement is never mistaken for the buffer the index was built from, even
+        # if torch's own private version counter happens to coincide. Not persisted state.
+        self._coreset_generation = 0
+
+    def load_state_dict(
+        self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False
+    ) -> Any:
+        """Load weights, and treat this as a coreset replacement for the turbovec index cache.
+
+        ``assign=True`` swaps in a brand new ``coreset`` tensor object rather than copying into
+        the existing one, so the cache key cannot rely on tensor identity or torch's own version
+        counter alone (a fresh buffer mutated once, as a freshly-fitted node's coreset is, reads
+        the same version as any other fresh buffer mutated once). Bumping the generation counter
+        here, for every load regardless of ``assign``, makes the next index check always see a
+        changed signature.
+        """
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        self._coreset_generation += 1
+        return result
 
     # ------------------------------------------------------------------ features
     def _pooled(self, x_bchw: Tensor, stride: int) -> Tensor:
@@ -328,10 +350,18 @@ class PatchCoreDetector(Node):
         return idx
 
     def _ensure_turbovec_index(self) -> TurbovecIndexState:
-        """Build (or rebuild, if the coreset changed) the CPU turbovec index."""
-        if self._turbovec_state is None or not self._turbovec_state.matches(self.coreset):
+        """Build (or rebuild, if the coreset changed) the CPU turbovec index.
+
+        Not safe to call concurrently from multiple threads on the same node instance: the
+        read-then-write of ``self._turbovec_state`` is unlocked, like the rest of this (or any)
+        stateful torch module. Callers that serve one node instance across concurrent requests
+        must serialize access to it themselves.
+        """
+        if self._turbovec_state is None or not self._turbovec_state.matches(
+            self.coreset, self._coreset_generation
+        ):
             self._turbovec_state = build_turbovec_index(
-                self.coreset, self.search_bit_width, self.eps
+                self.coreset, self.search_bit_width, self.eps, self._coreset_generation
             )
         return self._turbovec_state
 
@@ -448,6 +478,7 @@ class PatchCoreDetector(Node):
         self.mu.copy_(mu)
         self.sd.copy_(sd)
         self.coreset.copy_(core)
+        self._coreset_generation += 1
         self._statistically_initialized = True
         if self.search_backend == "turbovec":
             self._ensure_turbovec_index()

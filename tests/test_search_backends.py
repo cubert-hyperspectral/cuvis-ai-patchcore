@@ -91,15 +91,34 @@ def test_unit_normalize_handles_zero_norm_rows():
     assert torch.isfinite(unit).all()  # the zero row must not become NaN
 
 
-def test_coreset_signature_changes_with_shape_dtype_and_version():
+def test_coreset_signature_changes_with_shape_dtype_version_and_generation():
     a = torch.zeros(10, 4)
     b = torch.zeros(12, 4)
     c = a.to(torch.float64)
-    sig_a = _coreset_signature(a)
-    assert sig_a != _coreset_signature(b)
-    assert sig_a != _coreset_signature(c)
+    sig_a = _coreset_signature(a, generation=0)
+    assert sig_a != _coreset_signature(b, generation=0)
+    assert sig_a != _coreset_signature(c, generation=0)
     a.copy_(torch.ones(10, 4))
-    assert sig_a != _coreset_signature(a)  # version counter bumped by copy_
+    assert sig_a != _coreset_signature(a, generation=0)  # version counter bumped by copy_
+    assert sig_a != _coreset_signature(a, generation=1)  # a generation bump also changes it
+
+
+def test_coreset_signature_reads_as_a_sentinel_on_an_inference_tensor():
+    with torch.inference_mode():
+        t = torch.zeros(10, 4)
+        sig = _coreset_signature(t, generation=0)
+    assert sig[4] == -1  # the version slot: unreadable, not raised
+
+
+def test_coreset_signature_distinguishes_equal_version_different_buffers():
+    """Two freshly-created tensors each mutated exactly once land on the same torch version
+    counter; only the generation (or the storage address) tells them apart."""
+    a = torch.zeros(10, 4)
+    b = torch.zeros(10, 4)
+    a.copy_(torch.ones(10, 4))
+    b.copy_(torch.full((10, 4), 2.0))
+    assert a._version == b._version
+    assert _coreset_signature(a, generation=0) != _coreset_signature(b, generation=0)
 
 
 # ----- shortlist plumbing with a fake index (no turbovec needed) --------------------------------
@@ -129,7 +148,7 @@ class _FakeTurbovecIndex:
 def test_turbovec_shortlist_returns_fixed_candidate_ids():
     fake_index = _FakeTurbovecIndex(n_rows=10, fixed_ids=[3, 1, 7, 0])
     state = TurbovecIndexState(
-        index=fake_index, norms=torch.ones(10), signature=(10, torch.float32, 4, 0)
+        index=fake_index, norms=torch.ones(10), signature=(10, torch.float32, 4, 0, 0, 0)
     )
     flat = torch.randn(5, 4)
     ids = turbovec_shortlist(state, flat, shortlist_size=3, eps=1e-6)
@@ -142,7 +161,7 @@ def test_turbovec_shortlist_returns_fixed_candidate_ids():
 def test_turbovec_shortlist_clips_k_to_index_size():
     fake_index = _FakeTurbovecIndex(n_rows=2, fixed_ids=[1, 0])
     state = TurbovecIndexState(
-        index=fake_index, norms=torch.ones(2), signature=(2, torch.float32, 4, 0)
+        index=fake_index, norms=torch.ones(2), signature=(2, torch.float32, 4, 0, 0, 0)
     )
     flat = torch.randn(3, 4)
     ids = turbovec_shortlist(state, flat, shortlist_size=8, eps=1e-6)
