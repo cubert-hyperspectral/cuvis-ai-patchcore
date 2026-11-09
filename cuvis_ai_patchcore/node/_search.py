@@ -13,7 +13,7 @@ value as a distance.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -49,7 +49,6 @@ class TurbovecIndexState:
     index: Any
     norms: Tensor  # [N] exact (unpadded) coreset row norms, CPU float32
     signature: tuple[int, torch.dtype, int, int]  # (n_rows, dtype, n_dims, coreset._version)
-    clamped_negatives: int = field(default=0)
 
     def matches(self, coreset: Tensor) -> bool:
         return self.signature == _coreset_signature(coreset)

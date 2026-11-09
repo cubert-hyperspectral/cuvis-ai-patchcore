@@ -78,12 +78,6 @@ _AUTOCAST_DTYPES: dict[str, torch.dtype] = {
 # pre-scaling alone.
 _HALF_CLIP = 64.0
 _HALF_SCALE = 1.0 / 16.0
-# How many matmul-form nearest candidates get re-scored exactly in ``_nearest_distance``. The
-# matmul expansion |q|^2 + |c|^2 - 2 q.c is accurate enough to shortlist the true nearest row
-# almost always in the top few candidates, even when eager torch and an ONNX Runtime graph
-# decompose its fp32 cancellation differently; a shortlist this wide absorbs that disagreement
-# without the cost of scoring the whole coreset exactly (see tests/test_onnx_export.py).
-_REFINE_TOPK = 8
 
 
 class PatchCoreDetector(Node):
@@ -276,7 +270,6 @@ class PatchCoreDetector(Node):
         # Lazily built turbovec index; never part of the persisted state (see _search.py and the
         # README). None until the first build, by prepare_inference() or lazily in forward().
         self._turbovec_state: Any = None
-        self._turbovec_clamped_negatives: int = 0
 
     # ------------------------------------------------------------------ features
     def _pooled(self, x_bchw: Tensor, stride: int) -> Tensor:
@@ -356,10 +349,9 @@ class PatchCoreDetector(Node):
         cand_norms = state.norms.to(flat.device)[ids]  # [N, k]
         cand_norm_safe = cand_norms.clamp_min(self.eps)
         cos = (flat.unsqueeze(1) * candidates).sum(dim=-1) / (q_norm_safe * cand_norm_safe)
-        dist, n_clamped = reconstruct_cosine_distance(
+        dist, _n_clamped = reconstruct_cosine_distance(
             query_norms.unsqueeze(1).expand_as(cos), cand_norms, cos
         )
-        self._turbovec_clamped_negatives += n_clamped
         return dist.min(dim=1).values
 
     def _nearest_distance(self, flat: Tensor) -> Tensor:
