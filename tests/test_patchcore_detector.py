@@ -280,6 +280,10 @@ def test_hparams_are_json_serializable_and_complete():
         "standardize",
         "seed",
         "eps",
+        "search_backend",
+        "search_bit_width",
+        "shortlist_size",
+        "rescore",
     ):
         assert key in hp, key
     json.dumps(hp)  # must not raise
@@ -304,11 +308,25 @@ def test_hparams_are_json_serializable_and_complete():
         {"topk_frac": 1.5},
         {"chunk_size": 0},
         {"autocast_dtype": "float64"},
+        {"search_backend": "bogus"},
+        {"search_bit_width": 3},
+        {"search_bit_width": 8},
+        {"search_backend": "exact", "rescore": False},
+        {"shortlist_size": 0},
+        {"shortlist_size": -1},
     ],
 )
 def test_invalid_hparams_raise(bad):
     with pytest.raises(ValueError):
         PatchCoreDetector(**{**FIT_KW, **bad})
+
+
+def test_search_hparams_default_to_the_unchanged_exact_path():
+    node = PatchCoreDetector(**FIT_KW)
+    assert node.search_backend == "exact"
+    assert node.search_bit_width == 4
+    assert node.shortlist_size == 8
+    assert node.rescore is True
 
 
 def test_cpu_ignores_autocast_and_matches_fp32():
@@ -466,3 +484,17 @@ def test_tf32_on_cuda_stays_close_to_fp32():
     cube = _stream(1, seed=9)[0]["cube"].cuda()
     a, b = ref(cube=cube), tf(cube=cube)
     assert torch.allclose(b["scores"], a["scores"], rtol=1e-2, atol=1e-2)
+
+
+# ----- 7. exact backend stays turbovec-free --------------------------------------------------
+# The turbovec search backend's own tests live in test_patchcore_turbovec.py, which carries its
+# own module-scope importorskip("turbovec"); this test needs no turbovec import, so it stays here
+# and collects regardless of whether the optional dependency is installed.
+
+
+def test_exact_backend_never_builds_a_turbovec_index():
+    node = _fitted()
+    node.prepare_inference()
+    cube = _stream(1, seed=1)[0]["cube"]
+    node(cube=cube)
+    assert getattr(node, "_turbovec_state", None) is None

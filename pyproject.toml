@@ -52,6 +52,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+turbovec = [
+  "turbovec>=1.1.2,<2",
+]
 dev = [
   "pytest>=7",
   "pytest-cov",
@@ -64,6 +67,8 @@ dev = [
   "pyyaml",
   # The dynamo exporter and its ONNX Runtime CPU parity check, for the ONNX export test.
   "cuvis-ai-core[onnx]>=0.19.2",
+  # So CI runs the real turbovec tests instead of skipping them.
+  "cuvis-ai-patchcore[turbovec]",
 ]
 
 [project.urls]

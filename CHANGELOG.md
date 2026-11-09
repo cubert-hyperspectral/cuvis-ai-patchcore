@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+- `PatchCoreDetector` gets an optional `turbovec` search backend (`search_backend`,
+  `search_bit_width`, `shortlist_size`, `rescore` hparams): an approximate cosine shortlist over a
+  quantised coreset copy, with the fp32 rescoring kept exact over the shortlisted rows by default.
+  The default `search_backend: exact` keeps today's behaviour byte for byte; the turbovec index
+  adds no `state_dict` keys and has no ONNX export path. Requires the optional `turbovec` extra
+  (`cuvis-ai-patchcore[turbovec]`).
+
 ### Removed
 - Removed the fourteen score, mask and gate nodes (`ScoreRangeNormalizer`, `ScoreMapFusion`,
   `DecisionFusion`, `MaskComposite`, `ScoreMapSuppression`, `FrameScoreGate`, `GridSubsample`,
