@@ -108,3 +108,15 @@ def test_export_tags_the_node_as_onnx_exportable():
     from cuvis_ai_schemas.enums import NodeTag
 
     assert NodeTag.ONNX in PatchCoreDetector(**FIT_KW)._tags
+
+
+def test_turbovec_backend_refuses_onnx_export(tmp_path):
+    """The turbovec search path has no ONNX path (it calls out to a non-traceable CPU index), so
+    exporting a turbovec-configured node must fail clearly instead of silently tracing the wrong
+    thing or baking an untraceable call into the graph."""
+    pytest.importorskip("turbovec")
+    node = _fitted(search_backend="turbovec")
+    cube = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(1))
+    wrapper = _ScoresOnly(node, with_reference=False)
+    with pytest.raises((RuntimeError, ValueError)):
+        _export_and_run(wrapper, (cube,), tmp_path, "patchcore_turbovec_refused")

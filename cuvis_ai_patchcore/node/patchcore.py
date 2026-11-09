@@ -49,6 +49,13 @@ from cuvis_ai_patchcore.node._common import (
     tf32_matmul,
     topk_mean,
 )
+from cuvis_ai_patchcore.node._search import (
+    TurbovecIndexState,
+    build_turbovec_index,
+    reconstruct_cosine_distance,
+    turbovec_shortlist,
+    validate_search_hparams,
+)
 from cuvis_ai_patchcore.sampling import k_center_greedy
 from cuvis_ai_patchcore.streaming_stats import StreamingMeanVar
 
@@ -138,6 +145,10 @@ class PatchCoreDetector(Node):
         eps: float = 1e-6,
         coreset_projection: str | None = None,
         projection_eps: float = 0.9,
+        search_backend: str = "exact",
+        search_bit_width: int = 4,
+        shortlist_size: int = 8,
+        rescore: bool = True,
         **kwargs: Any,
     ) -> None:
         """Create an unfitted detector; buffers are sized from the constructor arguments.
@@ -171,6 +182,21 @@ class PatchCoreDetector(Node):
             distances, i.e. anomalib's ``KCenterGreedy`` recipe. Scoring always uses the original
             features; only which rows enter the bank changes.
         projection_eps : JL distortion parameter of the projection (anomalib default ``0.9``).
+        search_backend : ``"exact"`` (default, today's behaviour unchanged) shortlists candidate
+            rows through ``torch.cdist``'s matmul expansion; ``"turbovec"`` shortlists through an
+            approximate cosine search over a quantised coreset copy (the ``turbovec`` optional
+            dependency). Both backends rescore the shortlist exactly in fp32 by default; see
+            ``rescore``. Cosine ranking is not the Euclidean ranking PatchCore scores on when row
+            norms differ, so a turbovec-configured node should be validated against the exact
+            backend on representative data before deployment (see the README).
+        search_bit_width : quantisation width (``2`` or ``4``) of the turbovec index; only used
+            when ``search_backend="turbovec"``.
+        shortlist_size : candidate rows kept per query before rescoring, both backends (default
+            ``8``, matching the exact path's long-standing fixed shortlist, so the exact path's
+            behaviour is unchanged at the default). Clipped to the number of coreset rows.
+        rescore : recompute the exact fp32 Euclidean distance over the shortlisted rows (``True``,
+            the default) instead of reconstructing a distance from the approximate cosine and the
+            exact row norms (``False``). Only ``True`` is supported with ``search_backend="exact"``.
         """
         if input_channels <= 0:
             raise ValueError(f"input_channels must be positive, got {input_channels}")
@@ -197,6 +223,7 @@ class PatchCoreDetector(Node):
             )
         if not 0.0 < projection_eps < 1.0:
             raise ValueError(f"projection_eps must be in (0, 1), got {projection_eps}")
+        validate_search_hparams(search_backend, search_bit_width, shortlist_size, rescore)
 
         self.input_channels = int(input_channels)
         self.coreset_size = int(coreset_size)
@@ -213,6 +240,10 @@ class PatchCoreDetector(Node):
         self.eps = float(eps)
         self.coreset_projection = coreset_projection
         self.projection_eps = float(projection_eps)
+        self.search_backend = search_backend
+        self.search_bit_width = int(search_bit_width)
+        self.shortlist_size = int(shortlist_size)
+        self.rescore = bool(rescore)
 
         super().__init__(
             input_channels=self.input_channels,
@@ -230,6 +261,10 @@ class PatchCoreDetector(Node):
             eps=self.eps,
             coreset_projection=self.coreset_projection,
             projection_eps=self.projection_eps,
+            search_backend=self.search_backend,
+            search_bit_width=self.search_bit_width,
+            shortlist_size=self.shortlist_size,
+            rescore=self.rescore,
             **kwargs,
         )
 
@@ -238,6 +273,10 @@ class PatchCoreDetector(Node):
         self.register_buffer("sd", torch.ones(c, dtype=torch.float32))
         self.register_buffer("coreset", torch.zeros(self.coreset_size, c, dtype=torch.float32))
         self._nn_dtype = _AUTOCAST_DTYPES.get(autocast_dtype) if autocast_dtype else None
+        # Lazily built turbovec index; never part of the persisted state (see _search.py and the
+        # README). None until the first build, by prepare_inference() or lazily in forward().
+        self._turbovec_state: Any = None
+        self._turbovec_clamped_negatives: int = 0
 
     # ------------------------------------------------------------------ features
     def _pooled(self, x_bchw: Tensor, stride: int) -> Tensor:
@@ -264,17 +303,16 @@ class PatchCoreDetector(Node):
         counts = self._pooled(ones, stride) * k2
         return sums, counts.expand(cube.shape[0], -1, -1, -1)
 
-    def _nearest_distance(self, flat: Tensor) -> Tensor:
-        """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row.
+    def _exact_shortlist(self, flat: Tensor) -> Tensor:
+        """Candidate coreset row ids per query row by ``torch.cdist``'s matmul expansion.
 
         ``torch.cdist`` picks candidates from its matmul expansion
         ``|q|^2 + |c|^2 - 2 q.c``; eager torch and an ONNX Runtime graph from the dynamo exporter
         decompose that expansion's fp32 cancellation differently, which can disagree on which
-        single row is nearest when two rows are close. Taking the ``_REFINE_TOPK`` nearest
-        candidates by the matmul form, then rescoring only those few exactly
-        (``||q - c||`` on the original fp32 rows, no cancellation term) and keeping the closest,
-        makes the reported distance insensitive to that disagreement: the true nearest row is
-        overwhelmingly likely to be in the shortlist, and the exact rescoring resolves the rest.
+        single row is nearest when two rows are close. Taking the ``shortlist_size`` nearest
+        candidates by the matmul form (rescored exactly afterwards) makes the reported distance
+        insensitive to that disagreement: the true nearest row is overwhelmingly likely to be in
+        the shortlist, and the exact rescoring resolves the rest.
         """
         bank = self.coreset
         search_flat, search_bank = flat, bank
@@ -285,19 +323,71 @@ class PatchCoreDetector(Node):
                 search_bank = bank.clamp(-_HALF_CLIP, _HALF_CLIP)
             search_flat = (search_flat * _HALF_SCALE).to(self._nn_dtype)
             search_bank = (search_bank * _HALF_SCALE).to(self._nn_dtype)
-        k = min(_REFINE_TOPK, bank.shape[0])
-        out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
+        k = min(self.shortlist_size, bank.shape[0])
+        idx = torch.empty(flat.shape[0], k, dtype=torch.int64, device=flat.device)
         with tf32_matmul(self.tf32 and flat.is_cuda and self._nn_dtype is None):
             for i in range(0, flat.shape[0], self.chunk_size):
                 search_chunk = search_flat[i : i + self.chunk_size]
                 distances = torch.cdist(search_chunk, search_bank)
-                idx = torch.topk(distances, k, dim=1, largest=False).indices
-                # The shortlist only; the reported distance is always the exact fp32
-                # difference-form norm over those rows, never the matmul expansion's value.
-                chunk = flat[i : i + self.chunk_size]
-                candidates = bank[idx]  # [chunk, k, C]
-                diff = chunk.unsqueeze(1) - candidates
-                out[i : i + chunk.shape[0]] = diff.norm(dim=2).min(dim=1).values
+                idx[i : i + search_chunk.shape[0]] = torch.topk(
+                    distances, k, dim=1, largest=False
+                ).indices
+        return idx
+
+    def _ensure_turbovec_index(self) -> TurbovecIndexState:
+        """Build (or rebuild, if the coreset changed) the CPU turbovec index."""
+        if self._turbovec_state is None or not self._turbovec_state.matches(self.coreset):
+            self._turbovec_state = build_turbovec_index(
+                self.coreset, self.search_bit_width, self.eps
+            )
+        return self._turbovec_state
+
+    def _turbovec_shortlist_and_rescore(self, flat: Tensor) -> Tensor:
+        """turbovec cosine shortlist, then exact rescore or norm-reconstructed distance."""
+        state = self._ensure_turbovec_index()
+        ids = turbovec_shortlist(state, flat, self.shortlist_size, self.eps).to(flat.device)
+        candidates = self.coreset[ids]  # [N, k, C]
+        if self.rescore:
+            diff = flat.unsqueeze(1) - candidates
+            return diff.norm(dim=2).min(dim=1).values
+
+        query_norms = flat.norm(dim=-1)  # [N]
+        q_norm_safe = query_norms.clamp_min(self.eps).unsqueeze(1)  # [N, 1]
+        cand_norms = state.norms.to(flat.device)[ids]  # [N, k]
+        cand_norm_safe = cand_norms.clamp_min(self.eps)
+        cos = (flat.unsqueeze(1) * candidates).sum(dim=-1) / (q_norm_safe * cand_norm_safe)
+        dist, n_clamped = reconstruct_cosine_distance(
+            query_norms.unsqueeze(1).expand_as(cos), cand_norms, cos
+        )
+        self._turbovec_clamped_negatives += n_clamped
+        return dist.min(dim=1).values
+
+    def _nearest_distance(self, flat: Tensor) -> Tensor:
+        """Euclidean distance from each ``(N, C)`` query row to its nearest coreset row.
+
+        Shortlists ``shortlist_size`` candidate rows per query (exactly, via ``torch.cdist``'s
+        matmul expansion, or approximately, via a turbovec cosine search — see
+        ``search_backend``), then either rescores the shortlist's exact fp32 distance
+        (``rescore=True``) or reconstructs a distance from the approximate cosine and the exact
+        row norms (``rescore=False``, turbovec only).
+        """
+        if self.search_backend == "turbovec":
+            if torch.onnx.is_in_onnx_export():
+                raise RuntimeError(
+                    "PatchCoreDetector with search_backend='turbovec' cannot be exported to "
+                    "ONNX: the turbovec index runs on the CPU outside the traced graph. Use "
+                    "search_backend='exact' for an exportable node."
+                )
+            return self._turbovec_shortlist_and_rescore(flat)
+
+        bank = self.coreset
+        idx = self._exact_shortlist(flat)
+        out = torch.empty(flat.shape[0], dtype=torch.float32, device=flat.device)
+        for i in range(0, flat.shape[0], self.chunk_size):
+            chunk = flat[i : i + self.chunk_size]
+            candidates = bank[idx[i : i + chunk.shape[0]]]  # [chunk, k, C]
+            diff = chunk.unsqueeze(1) - candidates
+            out[i : i + chunk.shape[0]] = diff.norm(dim=2).min(dim=1).values
         return out
 
     # ------------------------------------------------------------------ phase 1
@@ -367,8 +457,21 @@ class PatchCoreDetector(Node):
         self.sd.copy_(sd)
         self.coreset.copy_(core)
         self._statistically_initialized = True
+        if self.search_backend == "turbovec":
+            self._ensure_turbovec_index()
 
     # ------------------------------------------------------------------ inference
+    def prepare_inference(self) -> None:
+        """Build the turbovec index once the pipeline's device and weights are final.
+
+        Called by the pipeline after every weights load (and after moving to its device); a
+        lazily-built index (the fallback for a node built outside a pipeline, or an older
+        ``cuvis-ai-core`` without this hook) is rebuilt here too since the loaded coreset may
+        differ from whatever built it.
+        """
+        if self.search_backend == "turbovec" and self._statistically_initialized:
+            self._ensure_turbovec_index()
+
     def forward(self, cube: Tensor, reference: Tensor | None = None, **_: Any) -> dict[str, Tensor]:
         """Score a BHWC grid against the fitted coreset; ``reference`` sets the output size."""
         require_fitted(self)

@@ -280,6 +280,10 @@ def test_hparams_are_json_serializable_and_complete():
         "standardize",
         "seed",
         "eps",
+        "search_backend",
+        "search_bit_width",
+        "shortlist_size",
+        "rescore",
     ):
         assert key in hp, key
     json.dumps(hp)  # must not raise
@@ -304,11 +308,25 @@ def test_hparams_are_json_serializable_and_complete():
         {"topk_frac": 1.5},
         {"chunk_size": 0},
         {"autocast_dtype": "float64"},
+        {"search_backend": "bogus"},
+        {"search_bit_width": 3},
+        {"search_bit_width": 8},
+        {"search_backend": "exact", "rescore": False},
+        {"shortlist_size": 0},
+        {"shortlist_size": -1},
     ],
 )
 def test_invalid_hparams_raise(bad):
     with pytest.raises(ValueError):
         PatchCoreDetector(**{**FIT_KW, **bad})
+
+
+def test_search_hparams_default_to_the_unchanged_exact_path():
+    node = PatchCoreDetector(**FIT_KW)
+    assert node.search_backend == "exact"
+    assert node.search_bit_width == 4
+    assert node.shortlist_size == 8
+    assert node.rescore is True
 
 
 def test_cpu_ignores_autocast_and_matches_fp32():
@@ -466,3 +484,143 @@ def test_tf32_on_cuda_stays_close_to_fp32():
     cube = _stream(1, seed=9)[0]["cube"].cuda()
     a, b = ref(cube=cube), tf(cube=cube)
     assert torch.allclose(b["scores"], a["scores"], rtol=1e-2, atol=1e-2)
+
+
+# ----- 7. turbovec search backend ---------------------------------------------------------------
+
+turbovec = pytest.importorskip("turbovec")
+
+
+def test_state_dict_keys_unchanged_with_turbovec_backend():
+    """No new persisted keys: a published .pt (exact backend) must load into a turbovec-configured
+    node and vice versa, since the index is rebuilt from the coreset, never stored."""
+    exact = _fitted()
+    tv = _fitted(search_backend="turbovec")
+    assert set(exact.state_dict()) == set(tv.state_dict()) == {"mu", "sd", "coreset"}
+
+
+def test_turbovec_rescore_matches_exact_on_a_small_synthetic_bank():
+    """rescore=True must reproduce the exact backend's distance (not merely its argmin): both
+    recompute the fp32 difference-form norm over the shortlisted rows, and with shortlist_size
+    covering the whole coreset the two backends shortlist a superset/equal set of the true
+    nearest rows."""
+    kw = {**FIT_KW, "coreset_size": 16, "max_bank_size": 200, "shortlist_size": 16}
+    exact = _fitted(**kw, search_backend="exact")
+    tv = _fitted(**kw, search_backend="turbovec", rescore=True)
+    assert torch.equal(exact.coreset, tv.coreset)
+    cube = torch.rand(1, H, W, C, generator=torch.Generator().manual_seed(42)) * 3 + 1
+    out_exact = exact(cube=cube)["scores"]
+    out_tv = tv(cube=cube)["scores"]
+    assert torch.allclose(out_exact, out_tv, atol=1e-4), (out_exact - out_tv).abs().max()
+
+
+def test_turbovec_no_rescore_uses_hand_checked_formula_on_known_vectors():
+    """With rescore=False, the reported distance comes from the norm-reconstruction formula, not
+    the true Euclidean distance. This test pins it on a tiny bank where the shortlist always
+    covers every row (k == n_coreset_rows), so the only approximation left is the formula's own
+    cosine input versus the exact cosine — checked here with a tolerance that catches a wrong
+    formula while allowing turbovec's own quantisation error."""
+    node = PatchCoreDetector(
+        input_channels=2,
+        coreset_size=4,
+        stride=1,
+        bank_stride=1,
+        pool_size=1,
+        max_bank_size=4,
+        standardize=False,
+        search_backend="turbovec",
+        search_bit_width=4,
+        shortlist_size=4,
+        rescore=False,
+    )
+    bank = torch.tensor([[3.0, 4.0], [0.0, 5.0], [-3.0, 4.0], [1.0, 0.0]])
+    node.statistical_initialization(iter([{"cube": bank.reshape(1, 4, 1, 2)}]))
+    query = torch.tensor([[5.0, 0.0]]).reshape(1, 1, 1, 2)
+    out = node(cube=query)["scores"][0, 0, 0, 0]
+    exact = torch.cdist(torch.tensor([[5.0, 0.0]]), bank).min().item()
+    assert out.item() == pytest.approx(exact, abs=0.25)  # quantised cosine, not exact
+
+
+def test_turbovec_pads_61_channel_bank_to_64():
+    node = PatchCoreDetector(
+        input_channels=61,
+        coreset_size=10,
+        stride=1,
+        bank_stride=4,
+        pool_size=1,
+        max_bank_size=100,
+        search_backend="turbovec",
+    )
+    cube = torch.rand(1, 12, 12, 61, generator=torch.Generator().manual_seed(1)) * 2 + 1
+    node.statistical_initialization(iter([{"cube": cube}]))
+    out = node(cube=cube)["scores"]
+    assert torch.isfinite(out).all()  # the node itself keeps C=61; padding is internal to the index
+
+
+def test_turbovec_index_rebuilt_after_load_state_dict():
+    node = _fitted(search_backend="turbovec", coreset_size=16, max_bank_size=200)
+    cube = _stream(1, seed=3)[0]["cube"]
+    node(cube=cube)  # build the index lazily
+    first_index = node._turbovec_state.index
+
+    fresh = PatchCoreDetector(
+        **{**FIT_KW, "coreset_size": 16, "max_bank_size": 200, "search_backend": "turbovec"}
+    )
+    fresh.load_state_dict(node.state_dict())
+    fresh(cube=cube)
+    assert fresh._turbovec_state.index is not first_index
+    assert torch.allclose(fresh(cube=cube)["scores"], node(cube=cube)["scores"], atol=1e-4)
+
+
+def test_turbovec_index_rebuilt_after_coreset_content_change():
+    """An in-place content change (a refit, or a weights load into the same buffer) bumps the
+    tensor's version counter; the cache keys on it, not just shape, so a same-shape refit still
+    triggers a rebuild instead of silently searching the stale rows."""
+    node = _fitted(search_backend="turbovec", coreset_size=16, max_bank_size=200)
+    cube = _stream(1, seed=3)[0]["cube"]
+    node(cube=cube)
+    first_index = node._turbovec_state.index
+    node.coreset.copy_(node.coreset + 1.0)  # same shape and dtype, new content
+    node(cube=cube)
+    assert node._turbovec_state.index is not first_index
+
+
+def test_turbovec_backend_builds_eagerly_after_statistical_initialization():
+    """statistical_initialization() builds the index right away (Phase 1 is interactive; the
+    first inference call should not pay the index-build cost)."""
+    node = PatchCoreDetector(
+        **{**FIT_KW, "coreset_size": 16, "max_bank_size": 200, "search_backend": "turbovec"}
+    )
+    assert node._turbovec_state is None
+    node.statistical_initialization(iter(_stream(seed=3)))
+    assert node._turbovec_state is not None
+
+
+def test_turbovec_backend_builds_lazily_as_a_fallback_without_prepare_inference():
+    """A node whose coreset arrives through load_state_dict alone (no fit, no prepare_inference
+    call — the restore path a Node base without the hook would leave it in) still builds the
+    index the first time it is needed, as a fallback."""
+    fitted = _fitted(search_backend="turbovec", coreset_size=16, max_bank_size=200)
+    restored = PatchCoreDetector(
+        **{**FIT_KW, "coreset_size": 16, "max_bank_size": 200, "search_backend": "turbovec"}
+    )
+    restored.load_state_dict(fitted.state_dict())
+    assert restored._turbovec_state is None
+    cube = _stream(1, seed=1)[0]["cube"]
+    out = restored(cube=cube)
+    assert torch.isfinite(out["scores"]).all()
+    assert restored._turbovec_state is not None
+
+
+def test_turbovec_prepare_inference_builds_the_index_eagerly():
+    node = _fitted(search_backend="turbovec", coreset_size=16, max_bank_size=200)
+    node.prepare_inference()
+    assert node._turbovec_state is not None
+
+
+def test_exact_backend_never_builds_a_turbovec_index():
+    node = _fitted()
+    node.prepare_inference()
+    cube = _stream(1, seed=1)[0]["cube"]
+    node(cube=cube)
+    assert getattr(node, "_turbovec_state", None) is None
